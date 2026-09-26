@@ -14,7 +14,7 @@ client speaks the same protocols directly:
 | Video (AST2100, RC4-protected) | 7578 | TCP | working |
 | RC4 video key | 5555 | TLS, certificate pinned | working |
 | Keyboard / mouse (IUSB, AES-128-CBC) | 5121 | TCP | handshake working, input delivery unverified |
-| Virtual CD-ROM / floppy | 5120 / 5123 | TCP | in progress |
+| Virtual CD-ROM / floppy (IUSB SCSI) | 5120 / 5123 | TCP | working (image files) |
 
 ## Build
 
@@ -45,6 +45,19 @@ cargo run --release -- viewer --jnlp jnlpgenerator-16   # downloaded launch file
 Click the framebuffer to send keyboard input. Keys are sent by physical
 position, so the host keyboard layout applies.
 
+The **CD-ROM…** and **Floppy/USB…** toolbar menus redirect an ISO image or a
+raw disk image to the host's virtual drives. Floppy images are read-only
+unless "Allow the host to write" is ticked before mounting. Mounted images
+come back after a reconnect.
+
+Headless media redirection (keeps a video session open like the vendor
+client; Ctrl-C to stop):
+
+```sh
+cargo run --release -- media --cdrom install.iso
+cargo run --release -- media --floppy stick.img --writable
+```
+
 Diagnostics:
 
 ```sh
@@ -71,6 +84,8 @@ away, because the ILOM has only a few web session slots.
   token authentication, challenge login, fragment reassembly and RC4.
 - `codec.rs`: runs AspeedTech's MPL-2.0 decoder (WebAssembly, via `wasmi`).
 - `hid.rs`: `HIDCMD` handshake, AES key derivation, IUSB input reports.
+- `vmedia.rs`, `scsi.rs`: virtual media channels and the SCSI command set of
+  the vendor image readers (CD-ROM and floppy/USB).
 
 ## Clean-room note and licences
 

@@ -1412,9 +1412,12 @@ No TLS, no IVTP framing, and no username/password login: one token
 authenticates the channel. IUSB fields are little-endian; CDB bytes keep
 normal SCSI big-endian order.
 
-**Status:** not implemented in `ilom-kvm-rs`. Everything below comes from
-reading the vendor client and describing its native libraries. **None of it
-has been checked against a live SP yet.**
+**Status:** implemented in `ilom-kvm-rs` (`src/vmedia.rs`, `src/scsi.rs`) for
+image files. The layout and command set below come from the vendor Java code
+and from the exported functions of its Linux image readers; the handshake,
+the packet layout and the host command traffic were then checked against a
+live SP (floppy image read by the host, CD image enumerated and read).
+Physical drives and NFS mode are not implemented.
 
 ### 10.1 Split between Java and native code
 
@@ -1450,26 +1453,21 @@ All are 32-bit only. The Java code refuses to start either channel on a
 | `executeXSCSICmd(ByteBuffer req, ByteBuffer resp)` → `int` | Run one request; return the total response length |
 | `getVersion()` → `String` | Library version |
 
-**Native internals**, from symbol names only (no disassembly):
+**Native internals.** The image readers (`ExecuteSCSICmd`,
+`ExecuteFloppyImageSCSICmd`) were examined for their packet offsets, command
+dispatch and sense codes; the results are in [§10.4](#104-iusb-scsi-packet)
+and [§10.5](#105-scsi-commands). Other points:
 
-- **CD image reader:** helpers for TestUnitReady, ReadCapacity, ReadCdrom,
-  ReadTOC, SetErrorStatus and ValidateISOImage. ValidateISOImage looks for
-  `CD001`, the ISO 9660 volume descriptor identifier at byte 32769
-  (sector 16, offset 1).
-- **Physical Linux CD reader:** helpers for TestUnitReady,
-  ReadActualCapacity, GetSectorSize, ReadCDROM and ReadTOC. Drives come from
-  `/proc/sys/dev/cdrom/info` and open as `/dev/%s` or `/dev/scd%c`.
-- **Floppy image reader:** helpers for TestUnitReady, ReadCapacity,
-  ReadFloppy, WriteFloppy, OpenImageReadOnly / OpenImageWritable,
-  SetImageReadOnly, CreateFloppyImage and LoadFromImage. A string `H1440`
-  also appears (meaning unknown, possibly 1.44 MB geometry).
-- **Physical Linux floppy reader:** a static media-changed flag inside the
-  command dispatcher and a static last-checked time inside ReadCapacity (a
-  rate limit or cache on media checks). It scans `/dev/fd%d` and USB floppies
-  on `/dev/sd%c`.
-- **Entry point:** `ExecuteSCSICmd(IUSB_SCSI_PACKET* req,
-  IUSB_SCSI_PACKET* resp, unsigned long* len)`; a `SCSI_COMMAND_PACKET` type
-  also exists.
+- **CD image check:** the reader requires `CD001`, the ISO 9660 volume
+  descriptor identifier at byte 32769 (sector 16, offset 1).
+- **Physical Linux CD reader:** drives come from `/proc/sys/dev/cdrom/info`
+  and open as `/dev/%s` or `/dev/scd%c`.
+- **Floppy image reader:** it reopens the image for every command, read-only
+  unless a WRITE arrives and writes are allowed.
+- **Physical Linux floppy reader:** scans `/dev/fd%d` and USB floppies on
+  `/dev/sd%c`.
+- **Return value:** the native command function reports the number of data
+  bytes; the JNI wrapper adds 61 to get the packet length.
 
 ### 10.2 Connection handshake
 
@@ -1496,10 +1494,11 @@ All are 32-bit only. The Java code refuses to start either channel on a
    | other / missing | Treated as denied | — |
 
    Offset 62 is the **second** byte of the data area
-   ([§10.4](#104-iusb-scsi-packet)). What byte 61 holds in the ACK is unknown
-   *(uncertain)*. There is no separate max-sessions reply: one CD session
-   and one floppy session per SP seems to be the limit, enforced by
-   status 2.
+   ([§10.4](#104-iusb-scsi-packet)). The ACK observed from the SP is
+   87 bytes: data length 55, opcode `0xF1` at 41, status `1` at 62, all other
+   bytes zero (device type and protocol are 0 in this packet). There is no
+   separate max-sessions reply: one CD session and one floppy session per SP
+   seems to be the limit, enforced by status 2.
 5. **(NFS mode only)** Send START_REMOTE_IMAGE ([§10.8](#108-nfs-mode)).
 6. Enter the request/response loop ([§10.6](#106-requestresponse-loop)).
 
@@ -1527,36 +1526,33 @@ Values the vendor client uses for CD-ROM:
 | 28 | 4 | reserved | 0 |
 
 These values come from the vendor factory for NFS packets. For normal
-responses the native library writes the header itself. The safest choice is
-to echo the request's device type, protocol, device/interface number and
-sequence, with direction `0x80`. *Uncertain:* the floppy device type and
-protocol are not visible in Java; the floppy NFS packets reuse the CD-ROM
-values.
+responses the native reader starts from a copy of the request's first 62
+bytes, so the header fields (device type, protocol, device/interface number,
+sequence) are echoed; Java then sets direction `0x80`, the data length and
+the checksum. `ilom-kvm-rs` does the same, with a header-only checksum, and
+the SP accepts it.
 
 **Framing.** A packet is 32 + data length bytes. The receiver waits until the
 whole packet is buffered and rejects it if the signature does not match.
 
 ### 10.4 IUSB SCSI packet
 
-Rebuilt from Java constants: packet size 62, opcode at byte 41, NFS path data
-at byte 61 with data length = 29 + path length. The native type name
-suggests a 12-byte CDB. The opcode offset (41), the data start (61) and the
-fixed size (62) are **certain**. The split of bytes 32–40 and 53–60 is
-**inferred**.
-
 | Offset | Size | Field | Notes |
 |---|---|---|---|
 | 0 | 32 | IUSB header | [§10.3](#103-iusb-header) |
-| 32 | 4 | transfer length (u32) | *Inferred*: expected transfer length set by the SP |
-| 36 | 4 | tag (u32) | *Inferred*: command tag; echo it in the response |
-| 40 | 1 | data direction | *Inferred*: values unknown |
-| 41 | 12 | CDB | Byte 41 = SCSI opcode, or vmedia control opcode `0xF0`–`0xF4` |
-| 53 | 1 | overall status | *Inferred*: 0 = good, non-zero = check condition |
-| 54 | 1 | sense key | *Inferred* |
-| 55 | 1 | ASC | *Inferred* |
-| 56 | 1 | ASCQ | *Inferred* |
-| 57 | 4 | data length (u32) | *Inferred*: payload bytes that follow |
-| 61 | n | data | Read payload (response), write payload (floppy WRITE request), or NFS path |
+| 32 | 4 | transfer length (u32) | *Inferred* name; echoed unchanged |
+| 36 | 4 | tag (u32) | *Inferred* name; echoed unchanged |
+| 40 | 1 | data direction | *Inferred* name; echoed unchanged |
+| 41 | 12 | CDB | Standard SCSI CDB (big-endian fields): opcode at 41, LBA at 43, READ(10) length at 48. Also carries vmedia control opcodes `0xF0`–`0xF4`. |
+| 53 | 1 | overall status | 0 = good, 1 = check condition |
+| 54 | 1 | sense key | |
+| 55 | 1 | ASC | |
+| 56 | 1 | ASCQ | |
+| 57 | 4 | data length (u32) | Payload bytes that follow |
+| 61 | n | data | Read payload (response) or write payload (floppy WRITE request), or NFS path |
+
+Offsets 41, 53–61 are the ones the native readers use. Bytes 32–40 are only
+copied, so their meaning does not matter to a client.
 
 A response is at most 61 + 131072 = **131133** bytes (the vendor response
 buffer size). Request buffers are 1024 bytes for CD-ROM (CD requests never
@@ -1567,51 +1563,77 @@ carry data) and 131133 bytes for floppy (WRITE carries up to 128 KiB).
 | Opcode | Name | Direction | Vendor use |
 |---|---|---|---|
 | `0xF0` | START_REMOTE_IMAGE_REDIRECTION | client → SP | NFS mode |
-| `0xF1` | DEVICE_REDIRECTION_ACK | SP → client | Handshake |
+| `0xF1` | DEVICE_REDIRECTION_ACK | SP → client | Handshake; also repeated by the SP while tearing a redirection down (observed) |
 | `0xF2` | STOP_REMOTE_IMAGE_REDIRECTION | client → SP | Defined, **never sent** |
 | `0xF3` | START_LOCAL_IMAGE_REDIRECTION | client → SP | Defined, never sent |
 | `0xF4` | CONTINUE_REMOTE_IMAGE_REDIRECTION | client → SP | NFS mode keep-alive/poll |
 
 ### 10.5 SCSI commands
 
-The SCSI interpreter lives in native code and its dispatch table was not
-examined. The lists below come from native helper names. **Which opcodes the
-SP really forwards is unconfirmed.** There are no INQUIRY, MODE SENSE, GET
-CONFIGURATION or REQUEST SENSE helpers. This suggests the SP's USB gadget
-answers device-identity commands itself and forwards only media access
-*(not confirmed)*.
+The SP's USB gadget answers device-identity commands (INQUIRY, MODE SENSE,
+GET CONFIGURATION, ...) itself. Only media access reaches the client. These
+are the commands the vendor image readers handle:
 
 **CD-ROM (2048-byte sectors):**
 
-| Opcode | Command | Evidence | Answer |
-|---|---|---|---|
-| `0x00` | TEST UNIT READY | helper | GOOD if media is present, else NOT READY (2/3A/00) |
-| `0x25` | READ CAPACITY(10) | helper | 8 bytes big-endian: last LBA, block length 2048 |
-| `0x28` | READ(10) | helper | LBA and 16-bit count from the CDB; ≤ 64 sectors per response |
-| `0xA8` | READ(12) | *probably the same helper (uncertain)* | Same as READ(10) |
-| `0x43` | READ TOC/PMA/ATIP | helper | One data track 1 plus lead-out `0xAA` at the capacity; format 0; MSF bit honoured |
-| other | — | error helper | Probably CHECK CONDITION ILLEGAL REQUEST (5/20/00) *(uncertain)* |
+| Opcode | Command | Answer |
+|---|---|---|
+| `0x00` | TEST UNIT READY | GOOD. Right after the image is opened, UNIT ATTENTION (6/28/00) once. |
+| `0x1B` | START STOP UNIT | GOOD |
+| `0x25` | READ CAPACITY(10) | 8 bytes big-endian: last LBA (blocks − 1), block length 2048. Also reports the pending UNIT ATTENTION. |
+| `0x28` | READ(10) | LBA (CDB bytes 2–5) and 16-bit count (bytes 7–8). No size check in the reader. |
+| `0x43` | READ TOC | Always a single-track TOC (see below), cut to the allocation length |
+| other | — | CHECK CONDITION 5/20/00 (invalid opcode). This includes PREVENT ALLOW MEDIUM REMOVAL (`0x1E`) and READ(12). |
+
+The vendor TOC is a 4-byte header (length, first track 1, last track 1),
+a track 1 descriptor (control `0x14` = data track, address LBA 0 or MSF
+00:02:00 when CDB bit 1.1 is set) and a lead-out descriptor (track `0xAA`,
+control `0x16`). Two vendor bugs: the lead-out is always in MSF form and is
+computed from the last LBA instead of the capacity, and the length field is
+taken after truncation. A start track above 1 other than `0xAA` returns no
+data. `ilom-kvm-rs` returns correct lead-out addresses, full lengths, the
+lead-out alone for start track `0xAA`, session info for format 1, and an
+error for other start tracks.
 
 **Floppy / USB image (512-byte sectors):**
 
-| Opcode | Command | Evidence | Answer |
-|---|---|---|---|
-| `0x00` | TEST UNIT READY | helper | GOOD, or UNIT ATTENTION after a media change |
-| `0x25` | READ CAPACITY(10) | helper | Last LBA, block length 512 |
-| `0x23` | READ FORMAT CAPACITIES | *not evidenced; typical for UFI (uncertain)* | Current capacity descriptor |
-| `0x28` | READ(10) | helper | ≤ 256 sectors per response |
-| `0x2A` | WRITE(10) | helper | Data at request offset 61. For a read-only image, refuse with DATA PROTECT (7/27/00) *(uncertain)* |
-| other | — | error helper | As for CD-ROM |
+| Opcode | Command | Answer |
+|---|---|---|
+| `0x00` | TEST UNIT READY | As for CD-ROM |
+| `0x04` | FORMAT UNIT | GOOD (nothing is done) |
+| `0x1B` | START STOP UNIT | GOOD |
+| `0x1E` | PREVENT ALLOW MEDIUM REMOVAL | GOOD |
+| `0x23` | READ FORMAT CAPACITIES | 12 bytes: list length 8, block count (u32 BE), descriptor type 2 (formatted) with block length 512. Without media: 2880 blocks, type 3. |
+| `0x25` | READ CAPACITY(10) | Last LBA, block length 512 |
+| `0x28` | READ(10) | At most 256 blocks, else 5/26/00 |
+| `0x2A` | WRITE(10) | Data at request offset 61; at most 256 blocks. Read-only image: 7/27/00. |
+| other | — | 5/20/00 |
 
-Recommended approach for a new implementation:
+**Sense codes** used by the readers (overall status 1 unless noted):
 
-- Implement the commands above.
-- Answer anything else with CHECK CONDITION ILLEGAL REQUEST / INVALID
-  OPCODE, and **log the opcode**, so the real set can be found on a live SP.
-- Answer START STOP UNIT (`0x1B`) and PREVENT/ALLOW MEDIUM REMOVAL (`0x1E`)
-  with GOOD in case they are forwarded.
-- Answer INQUIRY (`0x12`), MODE SENSE (`0x1A`/`0x5A`), GET CONFIGURATION
-  (`0x46`) and REQUEST SENSE (`0x03`) sensibly if they appear.
+| Sense | Meaning | Used for |
+|---|---|---|
+| 0/00/00 (status 0) | good | success |
+| 5/20/00 | invalid command operation code | unsupported command |
+| 5/21/00 | LBA out of range | read past the end |
+| 5/26/00 | invalid field in parameter list | floppy transfer above 256 blocks |
+| 5/53/02 | medium removal prevented | (defined) |
+| 6/28/00 | not ready to ready change, medium may have changed | first TUR / READ CAPACITY after open |
+| 3/11/00 | unrecovered read error | short read |
+| 2/3A/00 | medium not present | image not open |
+| 3/30/01, 3/30/02 | cannot read medium: unknown / incompatible format | (defined) |
+| 7/27/00 | write protected | WRITE to a read-only floppy image |
+
+**Observed host traffic.** A Linux host (Proxmox kernel 7.0) sends, for the
+CD: TEST UNIT READY, READ TOC in formats 0 and 1 with 12- and 20-byte
+allocations and an MSF lead-out query (start track `0xAA`), READ CAPACITY,
+PREVENT ALLOW MEDIUM REMOVAL, then READ(10). For the floppy it sends TEST
+UNIT READY, READ CAPACITY, PREVENT ALLOW MEDIUM REMOVAL and READ(10) of
+1 or 8 blocks at LBA 0 and at power-of-two offsets (partition and filesystem
+probes). READ FORMAT CAPACITIES was not seen.
+
+`ilom-kvm-rs` answers PREVENT ALLOW MEDIUM REMOVAL with GOOD for the CD too,
+and also accepts READ(12).
 
 Images: a CD image must pass the ISO 9660 `CD001` check. The file choosers
 filter on `.iso` (CD) and `.img` (floppy). Floppy images are raw sector
@@ -1632,6 +1654,8 @@ dumps.
   closes the channel.
 - Errors in the loop go to an error callback; the UI then stops the
   redirection and shows the message.
+- `ilom-kvm-rs` uses no read timeout: the host may not touch the drive for
+  a long time, and stopping shuts the socket down.
 
 ### 10.7 Stop, eject and media change
 
@@ -1639,6 +1663,11 @@ dumps.
   worker thread, shuts the socket down and closes it, then closes and
   deletes the native reader. The SP presumably treats the closed connection
   as media removal *(uncertain)*.
+- **SP teardown:** when the video session closed while a CD redirection was
+  still open, the SP sent `0xF1` packets on the media channel over and over
+  (observed). They are not SCSI commands: do not answer them. `ilom-kvm-rs`
+  ignores an `0xF1` with status 1 and ends the redirection on any other
+  status.
 - **Eject / change:** the Java side does nothing. To change the image, stop,
   then start with the new path. Media-change sense exists only inside the
   native physical-floppy reader. Behaviour on a host eject (START STOP UNIT
@@ -1800,6 +1829,8 @@ the socket in this mode.
 - The vendor native code reads each request at offset 0 of an already
   compacted buffer. This works only because the SP sends one request at a
   time and waits for the answer.
+- When the video session closes first, the SP repeats `0xF1` on the media
+  channel. Answering it as a SCSI command keeps the flood going.
 - The CD request buffer is 1024 bytes, so CD requests never carry data.
   Floppy WRITE requests carry up to 128 KiB.
 - A single READ response is capped at 131072 bytes (64 CD sectors,
