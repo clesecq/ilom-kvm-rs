@@ -10,3 +10,4 @@ pub mod rc4;
 pub mod hid;
 pub mod gui;
 pub mod viewer;
+pub mod keymap;

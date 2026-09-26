@@ -7,6 +7,7 @@ use eframe::egui::{
 
 use crate::{
     hid,
+    keymap::{self, Layout},
     viewer::{ConnectionState, DecodedFrame, Source, ViewerCommand, ViewerHandle, spawn_viewer},
 };
 
@@ -163,6 +164,7 @@ impl eframe::App for IlomApp {
 
 pub struct ViewerApp {
     handle: ViewerHandle,
+    layout: Layout,
     texture: Option<TextureHandle>,
     displayed_frame: Option<Arc<DecodedFrame>>,
     pressed_usages: BTreeSet<u8>,
@@ -180,6 +182,7 @@ impl ViewerApp {
         let handle = spawn_viewer(source, move || context.request_repaint());
         Self {
             handle,
+            layout: Layout::from_locale(),
             texture: None,
             displayed_frame: None,
             pressed_usages: BTreeSet::new(),
@@ -346,6 +349,30 @@ impl ViewerApp {
         });
     }
 
+    /// Types the clipboard text into the host using the selected layout.
+    fn paste_clipboard(&mut self) {
+        let text = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) => text,
+            Err(error) => {
+                self.notice = Some(format!("Clipboard unavailable: {error}"));
+                return;
+            }
+        };
+        const MAX_PASTE: usize = 10_000;
+        if text.chars().count() > MAX_PASTE {
+            self.notice = Some(format!("Clipboard text is longer than {MAX_PASTE} characters"));
+            return;
+        }
+        let (strokes, skipped) = keymap::text_to_strokes(self.layout, &text);
+        let mut notice = format!("Typing {} characters ({})", strokes.len(), self.layout.label());
+        if !skipped.is_empty() {
+            let sample: String = skipped.iter().take(10).collect();
+            notice.push_str(&format!("; skipped {} unsupported: {sample:?}", skipped.len()));
+        }
+        self.notice = Some(notice);
+        self.send(ViewerCommand::TypeStrokes(strokes));
+    }
+
     fn save_screenshot(&mut self) {
         let Some(frame) = self.displayed_frame.as_ref() else {
             self.notice = Some("No frame is available yet".into());
@@ -437,6 +464,33 @@ impl eframe::App for ViewerApp {
                     }
                     ui.separator();
                 }
+                if ui
+                    .small_button("Stop typing")
+                    .on_hover_text("Abort a paste that is still being typed")
+                    .clicked()
+                {
+                    self.handle
+                        .shared
+                        .cancel_typing
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                if ui
+                    .add_enabled(status.keyboard, egui::Button::new("Paste text"))
+                    .on_hover_text("Type the clipboard text on the host")
+                    .clicked()
+                {
+                    self.paste_clipboard();
+                }
+                egui::ComboBox::from_id_salt("host-layout")
+                    .selected_text(self.layout.label())
+                    .show_ui(ui, |ui| {
+                        for layout in Layout::ALL {
+                            ui.selectable_value(&mut self.layout, layout, layout.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text("Keyboard layout configured on the host (used for pasting)");
+                ui.separator();
                 if ui.button("Screenshot").clicked() {
                     self.save_screenshot();
                 }

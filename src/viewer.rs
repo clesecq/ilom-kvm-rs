@@ -19,6 +19,7 @@ use tracing::{info, warn};
 use crate::{
     codec::AspeedCodec,
     hid::{self, HidSession, HidStatus},
+    keymap,
     jnlp::{self, ConsoleArgs},
     tls::CertPolicy,
     tokend::Tokend,
@@ -122,6 +123,8 @@ pub struct ViewerShared {
     pub status: Mutex<ViewerStatus>,
     pub keyboard_packets_sent: AtomicU64,
     pub mouse_packets_sent: AtomicU64,
+    /// Set to abort a paste that is still being typed.
+    pub cancel_typing: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -129,6 +132,8 @@ pub enum ViewerCommand {
     Keyboard { modifiers: u8, usages: Vec<u8> },
     Keystroke { modifiers: u8, usage: u8 },
     MouseAbsolute { buttons: u8, x: u32, y: u32, width: u32, height: u32 },
+    /// Type a sequence of `(modifiers, usage)` keystrokes (clipboard paste).
+    TypeStrokes(Vec<keymap::Stroke>),
     Stop,
 }
 
@@ -143,6 +148,7 @@ pub struct ViewerHandle {
 impl ViewerHandle {
     pub fn stop_and_wait(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        self.shared.cancel_typing.store(true, Ordering::SeqCst);
         let _ = self.commands.send(ViewerCommand::Stop);
         // Unblock threads waiting in socket reads.
         if let Ok(sockets) = self.sockets.lock() {
@@ -372,6 +378,34 @@ fn spawn_status_reader(mut stream: TcpStream, shared: Arc<ViewerShared>, repaint
     }
 }
 
+/// Delay between reports while typing; the SP drops keys sent back to back.
+const TYPE_DELAY: Duration = Duration::from_millis(12);
+
+fn type_strokes(
+    session: &mut HidSession,
+    strokes: &[keymap::Stroke],
+    shared: &ViewerShared,
+) -> Result<u64> {
+    shared.cancel_typing.store(false, Ordering::SeqCst);
+    for &(modifiers, usage) in strokes {
+        if shared.cancel_typing.load(Ordering::SeqCst) {
+            session.send_keyboard(0, &[])?;
+            break;
+        }
+        // Press the modifiers alone first so the host sees them before the key.
+        if modifiers != 0 {
+            session.send_keyboard(modifiers, &[])?;
+            thread::sleep(TYPE_DELAY);
+        }
+        session.send_keyboard(modifiers, &[usage])?;
+        thread::sleep(TYPE_DELAY);
+        session.send_keyboard(0, &[])?;
+        thread::sleep(TYPE_DELAY);
+        shared.keyboard_packets_sent.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(strokes.len() as u64)
+}
+
 fn input_loop(
     commands: mpsc::Receiver<ViewerCommand>,
     hid: Arc<Mutex<Option<HidSession>>>,
@@ -404,6 +438,7 @@ fn input_loop(
             } => session
                 .send_absolute_mouse(buttons, x, y, width, height)
                 .map(|_| shared.mouse_packets_sent.fetch_add(1, Ordering::Relaxed)),
+            ViewerCommand::TypeStrokes(strokes) => type_strokes(session, &strokes, &shared),
             ViewerCommand::Stop => break,
         };
         if let Err(error) = result {
