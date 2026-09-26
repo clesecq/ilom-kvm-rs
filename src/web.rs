@@ -10,7 +10,8 @@ use tracing::{debug, info, warn};
 
 use crate::{
     jnlp::{self, ConsoleArgs},
-    tls::{self, CertPolicy},
+    known_certs::KnownCerts,
+    tls::{self, CertPolicy, FingerprintMismatch},
 };
 
 pub const HTTPS_PORT: u16 = 443;
@@ -90,6 +91,11 @@ impl WebSession {
         })
     }
 
+    /// SHA-256 of the web server certificate seen at login.
+    pub fn fingerprint(&self) -> [u8; 32] {
+        self.fingerprint
+    }
+
     /// Asks the SP for a new console launch file. Each one carries a fresh
     /// single-use tokend secret.
     pub fn console_args(&self) -> Result<ConsoleArgs> {
@@ -135,6 +141,48 @@ impl WebSession {
         debug!("ILOM web session closed");
         Ok(())
     }
+}
+
+/// Logs in, mints a JNLP and logs out again (ILOM has few web slots).
+///
+/// The web certificate is pinned trust-on-first-use through [`KnownCerts`]:
+/// the first successful login records it, and later logins refuse a
+/// different certificate before the password is sent.
+pub fn fetch_console_args(host: &str, username: &str, password: &str) -> Result<ConsoleArgs> {
+    let mut known = KnownCerts::load_default()?;
+    let pinned = known.get(host);
+    let policy = match pinned {
+        Some(fingerprint) => CertPolicy::Pinned(fingerprint),
+        None => CertPolicy::Insecure,
+    };
+    let web = match WebSession::login(host, policy, username, password) {
+        Ok(web) => web,
+        Err(error) if error.chain().any(|cause| cause.is::<FingerprintMismatch>()) => {
+            return Err(error.context(format!(
+                "the ILOM certificate changed since the last login; if this is \
+                 expected (new certificate), run `ilom-kvm forget-cert {host}` or \
+                 remove the line from {}",
+                known.path().display()
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    if pinned.is_none() {
+        let fingerprint = web.fingerprint();
+        warn!(
+            host,
+            fingerprint = %tls::format_fingerprint(&fingerprint),
+            "first login to this ILOM: trusting its certificate from now on"
+        );
+        if let Err(error) = known.insert(host, fingerprint) {
+            warn!(%error, "cannot save the certificate fingerprint");
+        }
+    }
+    let args = web.console_args();
+    if let Err(error) = web.logout() {
+        warn!(%error, "ILOM web logout failed");
+    }
+    args
 }
 
 fn request(

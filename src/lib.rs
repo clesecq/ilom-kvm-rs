@@ -5,6 +5,7 @@ pub mod hid;
 pub mod ivtp;
 pub mod jnlp;
 pub mod keymap;
+pub mod known_certs;
 pub mod rc4;
 pub mod tls;
 pub mod tokend;

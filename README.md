@@ -52,6 +52,11 @@ RUST_LOG=ilom_kvm=debug cargo run -- probe --frames 3          # saves PNGs to c
 RUST_LOG=ilom_kvm=debug cargo run -- probe --jnlp file.jnlp
 ```
 
+The first web login to an ILOM stores its certificate fingerprint in
+`~/.config/ilom-kvm/known_certs` (override with `ILOM_KNOWN_CERTS`). Later
+logins refuse a different certificate before sending the password. After a
+legitimate certificate change, run `ilom-kvm forget-cert <host>`.
+
 A JNLP secret works **once**. With web credentials, every connection (and
 every reconnect) mints a fresh JNLP and then closes the web session straight
 away, because the ILOM has only a few web session slots.

@@ -7,11 +7,12 @@ use ilom_kvm::{
     gui::IlomApp,
     hid::HidSession,
     jnlp::{self, ConsoleArgs},
+    known_certs::KnownCerts,
     tls::CertPolicy,
     tokend::Tokend,
     video::{VideoEvent, VideoSession},
     viewer::Source,
-    web::WebSession,
+    web,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -32,6 +33,11 @@ enum Command {
     Viewer(ViewerArgs),
     /// Connect, capture frames and run protocol diagnostics.
     Probe(ProbeArgs),
+    /// Forget the pinned certificate of an ILOM (after a legitimate change).
+    ForgetCert {
+        /// ILOM address as used for login.
+        host: String,
+    },
 }
 
 #[derive(clap::Args, Default)]
@@ -76,12 +82,7 @@ impl Target {
             .context("pass --jnlp or --host (or set ILOM_HOST)")?;
         let password = std::env::var("ILOM_PASSWORD")
             .context("set ILOM_PASSWORD in the environment or .env")?;
-        let web = WebSession::login(host, CertPolicy::Insecure, &self.user, &password)?;
-        let args = web.console_args();
-        if let Err(error) = web.logout() {
-            warn!(%error, "ILOM web logout failed");
-        }
-        args
+        web::fetch_console_args(host, &self.user, &password)
     }
 }
 
@@ -114,6 +115,7 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Some(Command::Probe(args)) => probe(args),
         Some(Command::Viewer(args)) => viewer(args),
+        Some(Command::ForgetCert { host }) => forget_cert(&host),
         None => viewer(ViewerArgs {
             user: std::env::var("ILOM_USER").unwrap_or_else(|_| "root".into()),
             host: std::env::var("ILOM_HOST").ok(),
@@ -156,6 +158,22 @@ fn viewer(args: ViewerArgs) -> Result<()> {
         }),
     )
     .map_err(|error| anyhow::anyhow!("GUI failed: {error}"))
+}
+
+fn forget_cert(host: &str) -> Result<()> {
+    let mut known = KnownCerts::load_default()?;
+    if known.remove(host)? {
+        println!(
+            "forgot the certificate of {host} ({})",
+            known.path().display()
+        );
+    } else {
+        println!(
+            "no pinned certificate for {host} in {}",
+            known.path().display()
+        );
+    }
+    Ok(())
 }
 
 fn load_jnlp(path: &PathBuf) -> Result<ConsoleArgs> {

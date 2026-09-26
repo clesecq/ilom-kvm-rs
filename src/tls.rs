@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use native_tls::{Protocol, TlsConnector, TlsStream};
 use sha2::{Digest, Sha256};
 
@@ -49,14 +49,30 @@ pub fn connect(host: &str, port: u16, policy: CertPolicy) -> Result<TlsStream<Tc
     if let CertPolicy::Pinned(expected) = policy {
         let actual = peer_fingerprint(&stream)?;
         if actual != expected {
-            bail!(
-                "certificate fingerprint mismatch on {host}:{port}: expected {}, got {}",
-                format_fingerprint(&expected),
-                format_fingerprint(&actual)
-            );
+            return Err(FingerprintMismatch {
+                host: host.to_string(),
+                port,
+                expected,
+                actual,
+            }
+            .into());
         }
     }
     Ok(stream)
+}
+
+/// The peer certificate differs from the pinned one.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "certificate fingerprint mismatch on {host}:{port}: expected {}, got {}",
+    format_fingerprint(expected),
+    format_fingerprint(actual)
+)]
+pub struct FingerprintMismatch {
+    pub host: String,
+    pub port: u16,
+    pub expected: [u8; 32],
+    pub actual: [u8; 32],
 }
 
 /// SHA-256 over the DER encoding of the peer certificate.

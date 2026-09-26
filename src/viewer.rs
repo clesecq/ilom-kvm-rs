@@ -24,7 +24,7 @@ use crate::{
     tls::CertPolicy,
     tokend::Tokend,
     video::{VideoEvent, VideoSession},
-    web::WebSession,
+    web,
 };
 
 /// Where launch parameters come from.
@@ -47,14 +47,7 @@ impl Source {
                 host,
                 username,
                 password,
-            } => {
-                let web = WebSession::login(host, CertPolicy::Insecure, username, password)?;
-                let args = web.console_args();
-                if let Err(error) = web.logout() {
-                    warn!(%error, "ILOM web logout failed");
-                }
-                args
-            }
+            } => web::fetch_console_args(host, username, password),
             Self::Jnlp(path) => {
                 let xml = std::fs::read_to_string(path)
                     .with_context(|| format!("read {}", path.display()))?;
