@@ -1,0 +1,81 @@
+# ilom-kvm-rs
+
+Java-free native client for the **Oracle ILOM Remote System Console**, the
+AMI MegaRAC-based redirection service found on ILOM service processors with
+an ASPEED AST2100-class video engine.
+
+The vendor console is a Java Web Start application (`jnlpgenerator-16`). This
+client speaks the same protocols directly:
+
+| Channel | Port | Transport | Status |
+|---|---|---|---|
+| Web login + JNLP (`/cgi-bin/jnlpgenerator-16`) | 443 | HTTPS | working |
+| Token daemon (one-time JNLP secret to redirection tokens) | 5556 | TLS, certificate pinned | working |
+| Video (AST2100, RC4-protected) | 7578 | TCP | working |
+| RC4 video key | 5555 | TLS, certificate pinned | working |
+| Keyboard / mouse (IUSB, AES-128-CBC) | 5121 | TCP | handshake working, input delivery unverified |
+| Virtual CD-ROM / floppy | 5120 / 5123 | TCP | in progress |
+
+## Build
+
+The ILOM only offers TLS 1.2 with RSA key exchange, so the client uses the
+system OpenSSL through `native-tls` (rustls cannot talk to it).
+
+```sh
+cargo build --release   # needs openssl-devel (pkg-config: openssl)
+cargo test
+```
+
+## Use
+
+Credentials can come from the environment or a git-ignored `.env` file:
+
+```sh
+cp .env.example .env    # set ILOM_HOST, ILOM_USER, ILOM_PASSWORD
+```
+
+Interactive viewer (the default command):
+
+```sh
+cargo run --release                 # login form
+cargo run --release -- viewer --auto          # connect with .env credentials
+cargo run --release -- viewer --jnlp jnlpgenerator-16   # downloaded launch file
+```
+
+Click the framebuffer to send keyboard input. Keys are sent by physical
+position, so the host keyboard layout applies.
+
+Diagnostics:
+
+```sh
+RUST_LOG=ilom_kvm=debug cargo run -- probe --frames 3          # saves PNGs to captures/
+RUST_LOG=ilom_kvm=debug cargo run -- probe --jnlp file.jnlp
+```
+
+A JNLP secret works **once**. With web credentials, every connection (and
+every reconnect) mints a fresh JNLP and then closes the web session straight
+away, because the ILOM has only a few web session slots.
+
+## How it works
+
+- `web.rs`: minimal HTTP/1.0 client. The ILOM web server repeats status lines
+  and mixes line endings, which strict HTTP stacks reject.
+- `tokend.rs`: exchanges the JNLP user and secret for 20-byte redirection
+  tokens and per-channel challenge data.
+- `video.rs`: `REDIRECT` device-capabilities exchange, 7-byte IVTP framing,
+  token authentication, challenge login, fragment reassembly and RC4.
+- `codec.rs`: runs AspeedTech's MPL-2.0 decoder (WebAssembly, via `wasmi`).
+- `hid.rs`: `HIDCMD` handshake, AES key derivation, IUSB input reports.
+
+## Clean-room note and licences
+
+The protocol was reimplemented from observation and from reading the vendor
+client. No vendor code is included. Decompiled references stay local in the
+git-ignored `reference/` directory.
+
+`third_party/aspeed_codec/decoder_wasm.wasm` is an unmodified build from
+[AspeedTech-BMC/aspeed_codec](https://github.com/AspeedTech-BMC/aspeed_codec)
+under MPL-2.0. The Rust code is MIT licensed.
+
+Keep service processors on a management network. Never expose them to the
+Internet.
