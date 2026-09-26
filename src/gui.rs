@@ -414,6 +414,29 @@ impl eframe::App for ViewerApp {
                         usage: USAGE_DELETE,
                     });
                 }
+                if let Some(leds) = status.leds {
+                    for (label, bit, usage) in [
+                        ("NUM", hid::LED_NUM_LOCK, hid::USAGE_NUM_LOCK),
+                        ("CAPS", hid::LED_CAPS_LOCK, hid::USAGE_CAPS_LOCK),
+                        ("SCROLL", hid::LED_SCROLL_LOCK, hid::USAGE_SCROLL_LOCK),
+                    ] {
+                        let on = leds & bit != 0;
+                        let text = egui::RichText::new(label).monospace().color(if on {
+                            Color32::from_rgb(80, 200, 120)
+                        } else {
+                            Color32::from_gray(110)
+                        });
+                        let clicked = ui
+                            .add(egui::Button::new(text).selected(on))
+                            .on_hover_text(format!("Host {label} lock is {}; click to toggle", if on { "on" } else { "off" }))
+                            .clicked();
+                        if clicked {
+                            self.send(ViewerCommand::Keystroke { modifiers: 0, usage });
+                            self.send(ViewerCommand::Keyboard { modifiers: 0, usages: Vec::new() });
+                        }
+                    }
+                    ui.separator();
+                }
                 if ui.button("Screenshot").clicked() {
                     self.save_screenshot();
                 }

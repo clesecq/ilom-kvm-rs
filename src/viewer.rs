@@ -18,7 +18,7 @@ use tracing::{info, warn};
 
 use crate::{
     codec::AspeedCodec,
-    hid::HidSession,
+    hid::{self, HidSession, HidStatus},
     jnlp::{self, ConsoleArgs},
     tls::CertPolicy,
     tokend::Tokend,
@@ -100,6 +100,8 @@ pub struct ViewerStatus {
     pub message: String,
     pub keyboard: bool,
     pub absolute_mouse: bool,
+    /// Host keyboard LED bitmap (`hid::LED_*`), once the host reports it.
+    pub leds: Option<u8>,
 }
 
 impl Default for ViewerStatus {
@@ -109,6 +111,7 @@ impl Default for ViewerStatus {
             message: "Starting".into(),
             keyboard: false,
             absolute_mouse: true,
+            leds: None,
         }
     }
 }
@@ -255,7 +258,7 @@ fn run(
 
 fn session(
     source: &Source,
-    shared: &ViewerShared,
+    shared: &Arc<ViewerShared>,
     stop: &AtomicBool,
     sockets: &Mutex<Vec<TcpStream>>,
     hid_slot: &Mutex<Option<HidSession>>,
@@ -274,7 +277,9 @@ fn session(
 
     match HidSession::connect(&console.host, &console.username, &mut tokend) {
         Ok(mut hid) => {
-            sockets.lock().unwrap().push(hid.try_clone_stream()?);
+            let stream = hid.try_clone_stream()?;
+            sockets.lock().unwrap().push(stream.try_clone()?);
+            spawn_status_reader(stream, shared.clone(), repaint.clone());
             // The vendor client toggles NumLock twice after connecting,
             // which makes the host report its LED state.
             if let Err(error) = hid.nudge_leds() {
@@ -341,6 +346,30 @@ fn session(
     };
     video.stop();
     result
+}
+
+/// Reads LED and status messages from the HID socket until it closes.
+fn spawn_status_reader(mut stream: TcpStream, shared: Arc<ViewerShared>, repaint: Repaint) {
+    let _ = stream.set_read_timeout(None);
+    let spawned = thread::Builder::new()
+        .name("ilom-hid-status".into())
+        .spawn(move || {
+            loop {
+                match hid::read_status(&mut stream) {
+                    Ok(HidStatus::Leds(leds)) => {
+                        set_status(&shared, &repaint, |status| status.leds = Some(leds));
+                    }
+                    Ok(other) => tracing::debug!(?other, "HID status"),
+                    Err(error) => {
+                        tracing::debug!(%error, "HID status reader ended");
+                        break;
+                    }
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        warn!(%error, "could not start HID status reader");
+    }
 }
 
 fn input_loop(

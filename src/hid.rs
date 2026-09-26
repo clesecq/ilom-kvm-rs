@@ -207,6 +207,57 @@ pub fn relative_mouse_packet(
     )
 }
 
+pub const LED_NUM_LOCK: u8 = 0x01;
+pub const LED_CAPS_LOCK: u8 = 0x02;
+pub const LED_SCROLL_LOCK: u8 = 0x04;
+
+pub const USAGE_NUM_LOCK: u8 = 0x53;
+pub const USAGE_CAPS_LOCK: u8 = 0x39;
+pub const USAGE_SCROLL_LOCK: u8 = 0x47;
+
+/// Unsolicited message from the SP on the HID channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HidStatus {
+    /// Host keyboard LED bitmap (`LED_*` bits).
+    Leds(u8),
+    /// Any other IUSB status or HID command reply.
+    Other { command: u16, status: u16 },
+}
+
+/// Reads one status message from the HID socket (IUSB status packets carry
+/// `[reserved, led_bitmap]`; HIDCMD replies are mouse-mode notifications).
+pub fn read_status(stream: &mut impl Read) -> Result<HidStatus> {
+    let mut signature = [0_u8; 8];
+    stream.read_exact(&mut signature)?;
+    if &signature == IUSB_SIGNATURE {
+        let mut rest = [0_u8; IUSB_HEADER_LEN - 8];
+        stream.read_exact(&mut rest)?;
+        let len = u32::from_le_bytes(rest[4..8].try_into().unwrap()) as usize;
+        if len > 4096 {
+            bail!("oversized IUSB status packet ({len} bytes)");
+        }
+        let mut data = vec![0_u8; len];
+        stream.read_exact(&mut data)?;
+        return Ok(match data.get(1) {
+            Some(leds) => HidStatus::Leds(*leds),
+            None => HidStatus::Other { command: 0, status: 0 },
+        });
+    }
+    if &signature == HID_SIGNATURE {
+        let mut rest = [0_u8; HID_HEADER_LEN - 8];
+        stream.read_exact(&mut rest)?;
+        let command = u16::from_le_bytes([rest[0], rest[1]]);
+        let status = u16::from_le_bytes([rest[2], rest[3]]);
+        // Mouse-mode replies (111/112) carry one status byte.
+        if status == 0 && matches!(command, 111 | 112) {
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte)?;
+        }
+        return Ok(HidStatus::Other { command, status });
+    }
+    bail!("unexpected HID status signature {signature:02x?}")
+}
+
 pub struct HidSession {
     stream: TcpStream,
     cipher: Option<HidCipher>,
@@ -325,9 +376,8 @@ impl HidSession {
     /// Presses NumLock twice (net no change) like the vendor client does
     /// after connecting; the host answers with IUSB LED status packets.
     pub fn nudge_leds(&mut self) -> Result<()> {
-        const NUM_LOCK: u8 = 0x53;
         for _ in 0..2 {
-            self.send_keystroke(0, NUM_LOCK)?;
+            self.send_keystroke(0, USAGE_NUM_LOCK)?;
             self.send_keyboard(0, &[])?;
         }
         Ok(())
@@ -396,6 +446,13 @@ mod tests {
             hex::encode(packet),
             "49555342202020200100205811000000003010800200000000000000010000000807f5d0763b51e0698e214025e2f0400b"
         );
+    }
+
+    #[test]
+    fn parses_led_status_packet() {
+        // Captured from the SP after a NumLock press.
+        let raw = hex::decode("4955534220202020010020d402000000003011000300000012000000000000000101").unwrap();
+        assert_eq!(read_status(&mut raw.as_slice()).unwrap(), HidStatus::Leds(LED_NUM_LOCK));
     }
 
     #[test]
