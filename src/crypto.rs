@@ -80,3 +80,51 @@ mod tests {
         assert_eq!(normalize_salt(&[0; 12]), vec![0, 0]);
     }
 }
+
+/// Salt the SP uses for its (non-standard) SHA-512 "crypt" in HID key
+/// derivation.
+const HID_SHA512_SALT: &str = "$6$I27m0w5z15um9P5f";
+const HID_HASH_FIELD: usize = 129;
+
+/// The vendor "SHA-512 crypt": a single SHA-512 over the password, the `$6$`
+/// magic and at most 13 salt characters. Not the glibc algorithm.
+fn vendor_sha512_crypt(password: &str, salt: &str) -> [u8; 64] {
+    use sha2::{Digest as _, Sha512};
+    let end = salt.len().min(16);
+    let mut digest = Sha512::new();
+    digest.update(password.as_bytes());
+    digest.update(&salt.as_bytes()[..3]);
+    digest.update(&salt.as_bytes()[3..end]);
+    digest.finalize().into()
+}
+
+/// AES-128 key for HID encryption level 2, derived from the session username
+/// and the 32-byte challenge data returned by tokend.
+pub fn hid_aes_key(username: &str, challenge_data: &[u8]) -> [u8; 16] {
+    use sha2::{Digest as _, Sha512};
+    let mut hash = vendor_sha512_crypt(username, HID_SHA512_SALT).to_vec();
+    hash.resize(HID_HASH_FIELD, 0);
+    let mut digest = Sha512::new();
+    digest.update(&hash);
+    digest.update(challenge_data);
+    let digest = digest.finalize();
+    digest[..16].try_into().unwrap()
+}
+
+/// AES-128-CBC with PKCS#7 padding, restarting from `iv` for every message.
+pub fn aes_cbc_encrypt(key: &[u8; 16], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+    cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into()).encrypt_padded_vec_mut::<Pkcs7>(data)
+}
+
+#[cfg(test)]
+mod hid_tests {
+    use super::*;
+
+    #[test]
+    fn aes_output_is_padded_to_blocks() {
+        let key = hid_aes_key("root-sp-1", &[7; 32]);
+        assert_eq!(aes_cbc_encrypt(&key, &[0; 16], &[0; 8]).len(), 16);
+        assert_eq!(aes_cbc_encrypt(&key, &[0; 16], &[0; 16]).len(), 32);
+    }
+}

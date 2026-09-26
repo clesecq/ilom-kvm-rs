@@ -128,7 +128,7 @@ impl WebSession {
             &self.host,
             self.policy,
             "GET",
-            "/iPages/logout.asp",
+            "/logout.asp",
             &[(SESSION_COOKIE, &self.session)],
             None,
         )?;

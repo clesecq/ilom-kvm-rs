@@ -7,3 +7,4 @@ pub mod tokend;
 pub mod video;
 pub mod web;
 pub mod rc4;
+pub mod hid;

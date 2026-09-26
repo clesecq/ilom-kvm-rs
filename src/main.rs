@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilom_kvm::{
     codec::AspeedCodec,
+    hid::HidSession,
     jnlp::{self, ConsoleArgs},
     video::{VideoEvent, VideoSession},
     tls::CertPolicy,
@@ -39,10 +40,11 @@ struct Target {
 }
 
 impl Target {
-    /// Returns launch arguments plus the web session to close afterwards.
-    fn resolve(&self) -> Result<(ConsoleArgs, Option<WebSession>)> {
+    /// Returns launch arguments. A web session is only needed to mint the
+    /// JNLP, so it is closed again straight away (ILOM has few web slots).
+    fn resolve(&self) -> Result<ConsoleArgs> {
         if let Some(path) = &self.jnlp {
-            return Ok((load_jnlp(path)?, None));
+            return load_jnlp(path);
         }
         let host = self
             .host
@@ -51,8 +53,11 @@ impl Target {
         let password = std::env::var("ILOM_PASSWORD")
             .context("set ILOM_PASSWORD in the environment or .env")?;
         let web = WebSession::login(host, CertPolicy::Insecure, &self.user, &password)?;
-        let args = web.console_args()?;
-        Ok((args, Some(web)))
+        let args = web.console_args();
+        if let Err(error) = web.logout() {
+            warn!(%error, "ILOM web logout failed");
+        }
+        args
     }
 }
 
@@ -65,6 +70,14 @@ struct ProbeArgs {
     frames: u32,
     #[arg(long, default_value = "captures")]
     output_dir: PathBuf,
+    /// Also open the keyboard/mouse channel and send a harmless report
+    /// (Shift press and release, pointer to the screen centre).
+    #[arg(long)]
+    hid: bool,
+    /// With --hid: after the first frame type this USB usage, then erase it
+    /// with Backspace before exiting (e.g. 0x04 for "a").
+    #[arg(long, value_parser = parse_usage, requires = "hid")]
+    type_usage: Option<u8>,
 }
 
 fn main() -> Result<()> {
@@ -94,8 +107,13 @@ fn cert_policy(args: &ConsoleArgs) -> CertPolicy {
     }
 }
 
+fn parse_usage(value: &str) -> Result<u8, String> {
+    let digits = value.trim_start_matches("0x");
+    u8::from_str_radix(digits, 16).map_err(|error| format!("invalid USB usage {value:?}: {error}"))
+}
+
 fn probe(args: ProbeArgs) -> Result<()> {
-    let (console, web) = args.target.resolve()?;
+    let console = args.target.resolve()?;
     info!(host = %console.host, user = %console.username, depth = console.color_depth, "loaded JNLP");
     let policy = cert_policy(&console);
     let mut tokend = Tokend::connect(
@@ -105,6 +123,27 @@ fn probe(args: ProbeArgs) -> Result<()> {
         &console.secret,
     )?;
     let mut video = VideoSession::connect(&console.host, policy, &console.username, &mut tokend)?;
+    let mut hid = if args.hid {
+        let mut hid = HidSession::connect(&console.host, &console.username, &mut tokend)?;
+        let mut reader = hid.try_clone_stream()?;
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buffer = [0_u8; 256];
+            while let Ok(n) = reader.read(&mut buffer) {
+                if n == 0 {
+                    break;
+                }
+                tracing::debug!(bytes = %hex::encode(&buffer[..n]), "HID socket data");
+            }
+        });
+        hid.send_keyboard(0x02, &[])?;
+        hid.send_keyboard(0, &[])?;
+        hid.send_absolute_mouse(0, 512, 384, 1024, 768)?;
+        info!("sent HID test reports");
+        Some(hid)
+    } else {
+        None
+    };
     std::fs::create_dir_all(&args.output_dir)?;
     let mut codec = AspeedCodec::new()?;
     let mut saved = 0;
@@ -133,16 +172,29 @@ fn probe(args: ProbeArgs) -> Result<()> {
                     )?;
                     info!(path = %path.display(), "saved");
                     saved += 1;
+                    if saved == 1
+                        && let (Some(hid), Some(usage)) = (hid.as_mut(), args.type_usage)
+                    {
+                        // The host may still be enumerating the virtual USB
+                        // keyboard right after the HID channel starts.
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        hid.send_keystroke(0, usage)?;
+                        info!(usage, "typed test key");
+                    }
                 }
                 event => info!(?event, "video event"),
             }
         }
         Ok(())
     })();
+    if let Some(mut hid) = hid {
+        if args.type_usage.is_some() {
+            const BACKSPACE: u8 = 0x2a;
+            hid.send_keystroke(0, BACKSPACE)?;
+        }
+        hid.close();
+    }
     video.stop();
     tokend.close();
-    if let Some(web) = web {
-        web.logout()?;
-    }
     result
 }
