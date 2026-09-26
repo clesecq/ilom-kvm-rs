@@ -587,6 +587,31 @@ fn key_to_usage(key: Key) -> Option<u8> {
         Key::ArrowUp => 0x52,
         // ISO key left of Z (`<>` on AZERTY/QWERTZ).
         Key::IntlBackslash => 0x64,
+        Key::F13 => 0x68,
+        // Keypad and lock keys, delivered on F14–F35 by the patched
+        // egui-winit in third_party/egui-winit.
+        Key::F14 => 0x65, // Menu
+        Key::F15 => 0x48, // Pause
+        Key::F16 => 0x46, // PrintScreen
+        Key::F17 => 0x47, // ScrollLock
+        Key::F18 => 0x39, // CapsLock
+        Key::F19 => 0x53, // NumLock
+        Key::F20 => 0x58, // Keypad Enter
+        Key::F21 => 0x54, // Keypad /
+        Key::F22 => 0x55, // Keypad *
+        Key::F23 => 0x56, // Keypad -
+        Key::F24 => 0x57, // Keypad +
+        Key::F25 => 0x62, // Keypad 0
+        Key::F26 => 0x59, // Keypad 1
+        Key::F27 => 0x5a,
+        Key::F28 => 0x5b,
+        Key::F29 => 0x5c,
+        Key::F30 => 0x5d,
+        Key::F31 => 0x5e,
+        Key::F32 => 0x5f,
+        Key::F33 => 0x60,
+        Key::F34 => 0x61, // Keypad 9
+        Key::F35 => 0x63, // Keypad .
         _ => return None,
     })
 }
@@ -610,5 +635,7 @@ mod tests {
         assert_eq!(modifier_bit(Key::AltRight), Some(0x40));
         assert_eq!(modifier_bit(Key::A), None);
         assert_eq!(key_to_usage(Key::IntlBackslash), Some(0x64));
+        assert_eq!(key_to_usage(Key::F26), Some(0x59));
+        assert_eq!(key_to_usage(Key::F25), Some(0x62));
     }
 }
