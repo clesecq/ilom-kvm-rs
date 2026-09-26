@@ -135,7 +135,8 @@ impl MediaImage {
         let opcode = cdb[0];
         match (self.kind, opcode) {
             (_, TEST_UNIT_READY) => self.check_attention().map(|()| Vec::new()),
-            (_, START_STOP_UNIT) => Ok(Vec::new()),
+            // The vendor CD reader rejects PREVENT ALLOW; hosts cope either way.
+            (_, START_STOP_UNIT | PREVENT_ALLOW_REMOVAL) => Ok(Vec::new()),
             (_, READ_CAPACITY_10) => {
                 self.check_attention()?;
                 Ok(self.read_capacity())
@@ -143,7 +144,7 @@ impl MediaImage {
             (_, READ_10) => self.read(be32(&cdb[2..6]), u32::from(be16(&cdb[7..9]))),
             (MediaKind::Cdrom, READ_12) => self.read(be32(&cdb[2..6]), be32(&cdb[6..10])),
             (MediaKind::Cdrom, READ_TOC) => self.read_toc(cdb),
-            (MediaKind::Floppy, FORMAT_UNIT | PREVENT_ALLOW_REMOVAL) => Ok(Vec::new()),
+            (MediaKind::Floppy, FORMAT_UNIT) => Ok(Vec::new()),
             (MediaKind::Floppy, READ_FORMAT_CAPACITIES) => Ok(truncate(
                 self.read_format_capacities(),
                 usize::from(be16(&cdb[7..9])),

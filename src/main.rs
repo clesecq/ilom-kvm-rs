@@ -8,10 +8,12 @@ use ilom_kvm::{
     hid::HidSession,
     jnlp::{self, ConsoleArgs},
     known_certs::KnownCerts,
+    scsi::{MediaImage, MediaKind},
     tls::CertPolicy,
     tokend::Tokend,
     video::{VideoEvent, VideoSession},
     viewer::Source,
+    vmedia::MediaChannel,
     web,
 };
 use tracing::{info, warn};
@@ -33,6 +35,9 @@ enum Command {
     Viewer(ViewerArgs),
     /// Connect, capture frames and run protocol diagnostics.
     Probe(ProbeArgs),
+    /// Redirect disk images to the host's virtual CD-ROM and floppy/USB
+    /// drives until the SP closes the channels (Ctrl-C to stop).
+    Media(MediaArgs),
     /// Forget the pinned certificate of an ILOM (after a legitimate change).
     ForgetCert {
         /// ILOM address as used for login.
@@ -105,6 +110,24 @@ struct ProbeArgs {
     type_usage: Option<u8>,
 }
 
+#[derive(clap::Args)]
+struct MediaArgs {
+    #[command(flatten)]
+    target: Target,
+    /// ISO 9660 image for the virtual CD-ROM.
+    #[arg(long, required_unless_present = "floppy")]
+    cdrom: Option<PathBuf>,
+    /// Raw disk image (floppy or USB stick) for the virtual floppy drive.
+    #[arg(long)]
+    floppy: Option<PathBuf>,
+    /// Let the host write to the floppy image.
+    #[arg(long, requires = "floppy")]
+    writable: bool,
+    /// Skip the video session the vendor client always runs alongside.
+    #[arg(long)]
+    no_video: bool,
+}
+
 fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()
@@ -115,6 +138,7 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Some(Command::Probe(args)) => probe(args),
         Some(Command::Viewer(args)) => viewer(args),
+        Some(Command::Media(args)) => media(args),
         Some(Command::ForgetCert { host }) => forget_cert(&host),
         None => viewer(ViewerArgs {
             user: std::env::var("ILOM_USER").unwrap_or_else(|_| "root".into()),
@@ -294,6 +318,83 @@ fn probe(args: ProbeArgs) -> Result<()> {
         hid.close();
     }
     video.stop();
+    tokend.close();
+    result
+}
+
+fn media(args: MediaArgs) -> Result<()> {
+    let mut images = Vec::new();
+    for (kind, path) in [
+        (MediaKind::Cdrom, &args.cdrom),
+        (MediaKind::Floppy, &args.floppy),
+    ] {
+        if let Some(path) = path {
+            let image = MediaImage::open(path, kind, args.writable)?;
+            info!(
+                kind = kind.label(),
+                path = %path.display(),
+                blocks = image.blocks(),
+                writable = image.writable(),
+                "opened image"
+            );
+            images.push(image);
+        }
+    }
+
+    let console = args.target.resolve()?;
+    info!(host = %console.host, user = %console.username, "loaded JNLP");
+    let policy = cert_policy(&console);
+    let mut tokend = Tokend::connect(&console.host, policy, &console.username, &console.secret)?;
+    let video = if args.no_video {
+        None
+    } else {
+        let mut video =
+            VideoSession::connect(&console.host, policy, &console.username, &mut tokend)?;
+        video.set_read_timeout(None)?;
+        let stream = video.try_clone_stream()?;
+        // Frames are not needed; keep reading so the SP does not stall.
+        std::thread::spawn(move || {
+            while let Ok(event) = video.next_event() {
+                tracing::trace!(?event, "video event ignored");
+            }
+        });
+        Some(stream)
+    };
+
+    let mut workers = Vec::new();
+    for mut image in images {
+        let kind = image.kind();
+        let token = tokend.redirection_token()?;
+        let mut channel = MediaChannel::connect(&console.host, kind, &token)?;
+        workers.push(std::thread::spawn(move || -> Result<()> {
+            let mut last_report = std::time::Instant::now();
+            channel.serve(&mut image, |stats| {
+                if last_report.elapsed() >= std::time::Duration::from_secs(10) {
+                    last_report = std::time::Instant::now();
+                    info!(
+                        kind = kind.label(),
+                        commands = stats.commands,
+                        read_mib = stats.bytes_read / (1 << 20),
+                        written_kib = stats.bytes_written / 1024,
+                        "media activity"
+                    );
+                }
+            })
+        }));
+    }
+    info!("media redirected; press Ctrl-C to stop");
+
+    let mut result = Ok(());
+    for worker in workers {
+        match worker.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => result = Err(error),
+            Err(_) => result = Err(anyhow::anyhow!("media thread panicked")),
+        }
+    }
+    if let Some(stream) = video {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
     tokend.close();
     result
 }
