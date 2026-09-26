@@ -1,5 +1,5 @@
 //! Background session that feeds the GUI: video decoding on one thread,
-//! keyboard/mouse commands on another.
+//! keyboard/mouse commands on another, one more per mounted media image.
 
 use std::{
     net::{Shutdown, TcpStream},
@@ -10,7 +10,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -21,9 +21,11 @@ use crate::{
     hid::{self, HidSession, HidStatus},
     jnlp::{self, ConsoleArgs},
     keymap,
+    scsi::{MediaImage, MediaKind},
     tls::CertPolicy,
     tokend::Tokend,
     video::{VideoEvent, VideoSession},
+    vmedia::{MediaChannel, MediaStats},
     web,
 };
 
@@ -88,6 +90,18 @@ pub enum ConnectionState {
     Stopped,
 }
 
+/// State of one virtual media drive.
+#[derive(Debug, Clone, Default)]
+pub struct MediaStatus {
+    /// File name of the image the user chose, kept across reconnects.
+    pub image: Option<String>,
+    pub writable: bool,
+    /// The SP accepted the redirection and forwards host commands.
+    pub active: bool,
+    pub stats: MediaStats,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ViewerStatus {
     pub state: ConnectionState,
@@ -96,6 +110,24 @@ pub struct ViewerStatus {
     pub absolute_mouse: bool,
     /// Host keyboard LED bitmap (`hid::LED_*`), once the host reports it.
     pub leds: Option<u8>,
+    pub cdrom: MediaStatus,
+    pub floppy: MediaStatus,
+}
+
+impl ViewerStatus {
+    pub fn media(&self, kind: MediaKind) -> &MediaStatus {
+        match kind {
+            MediaKind::Cdrom => &self.cdrom,
+            MediaKind::Floppy => &self.floppy,
+        }
+    }
+
+    fn media_mut(&mut self, kind: MediaKind) -> &mut MediaStatus {
+        match kind {
+            MediaKind::Cdrom => &mut self.cdrom,
+            MediaKind::Floppy => &mut self.floppy,
+        }
+    }
 }
 
 impl Default for ViewerStatus {
@@ -106,6 +138,8 @@ impl Default for ViewerStatus {
             keyboard: false,
             absolute_mouse: true,
             leds: None,
+            cdrom: MediaStatus::default(),
+            floppy: MediaStatus::default(),
         }
     }
 }
@@ -139,6 +173,13 @@ pub enum ViewerCommand {
     },
     /// Type a sequence of `(modifiers, usage)` keystrokes (clipboard paste).
     TypeStrokes(Vec<keymap::Stroke>),
+    /// Redirect an image file to the host's virtual CD-ROM or floppy drive.
+    Mount {
+        kind: MediaKind,
+        path: PathBuf,
+        writable: bool,
+    },
+    Unmount(MediaKind),
     Stop,
 }
 
@@ -216,18 +257,21 @@ fn run(
 ) {
     // Keyboard/mouse commands are routed to whichever HID session is current.
     let hid: Arc<Mutex<Option<HidSession>>> = Arc::new(Mutex::new(None));
+    let media = Arc::new(Media::new(shared.clone(), repaint.clone()));
     let input_thread = {
         let hid = hid.clone();
         let shared = shared.clone();
+        let media = media.clone();
         thread::Builder::new()
             .name("ilom-input".into())
-            .spawn(move || input_loop(commands, hid, shared))
+            .spawn(move || input_loop(commands, hid, media, shared))
             .expect("spawn input thread")
     };
 
     let mut attempt = 0_u32;
     while !stop.load(Ordering::SeqCst) {
-        let result = session(&source, &shared, &stop, &sockets, &hid, &repaint);
+        let result = session(&source, &shared, &stop, &sockets, &hid, &media, &repaint);
+        media.link_down();
         if let Some(session) = hid.lock().ok().and_then(|mut hid| hid.take()) {
             session.close();
         }
@@ -273,6 +317,7 @@ fn session(
     stop: &AtomicBool,
     sockets: &Mutex<Vec<TcpStream>>,
     hid_slot: &Mutex<Option<HidSession>>,
+    media: &Arc<Media>,
     repaint: &Repaint,
 ) -> Result<()> {
     set_status(shared, repaint, |status| {
@@ -310,7 +355,11 @@ fn session(
             set_status(shared, repaint, |status| status.keyboard = false);
         }
     }
-    tokend.close();
+    // Media channels ask tokend for tokens whenever an image is mounted.
+    media.link_up(Link {
+        host: console.host.clone(),
+        tokend,
+    });
 
     set_status(shared, repaint, |status| {
         status.state = ConnectionState::Connected;
@@ -416,9 +465,25 @@ fn type_strokes(
 fn input_loop(
     commands: mpsc::Receiver<ViewerCommand>,
     hid: Arc<Mutex<Option<HidSession>>>,
+    media: Arc<Media>,
     shared: Arc<ViewerShared>,
 ) {
     for command in commands {
+        let command = match command {
+            ViewerCommand::Mount {
+                kind,
+                path,
+                writable,
+            } => {
+                media.mount(kind, path, writable);
+                continue;
+            }
+            ViewerCommand::Unmount(kind) => {
+                media.unmount(kind);
+                continue;
+            }
+            command => command,
+        };
         let mut guard = match hid.lock() {
             Ok(guard) => guard,
             Err(_) => break,
@@ -446,10 +511,234 @@ fn input_loop(
                 .send_absolute_mouse(buttons, x, y, width, height)
                 .map(|_| shared.mouse_packets_sent.fetch_add(1, Ordering::Relaxed)),
             ViewerCommand::TypeStrokes(strokes) => type_strokes(session, &strokes, &shared),
+            ViewerCommand::Mount { .. } | ViewerCommand::Unmount(_) => unreachable!(),
             ViewerCommand::Stop => break,
         };
         if let Err(error) = result {
             warn!(%error, "HID send failed");
         }
+    }
+}
+
+/// What media channels need from the current console session.
+struct Link {
+    host: String,
+    tokend: Tokend,
+}
+
+/// An image the user mounted. It stays wanted across reconnects until the
+/// user unmounts it.
+struct Mount {
+    kind: MediaKind,
+    path: PathBuf,
+    writable: bool,
+    /// Bumped on every connection attempt so stale threads stay quiet.
+    generation: u64,
+    stream: Option<TcpStream>,
+}
+
+/// Mounted media images and their redirection threads.
+struct Media {
+    link: Mutex<Option<Link>>,
+    mounts: Mutex<Vec<Mount>>,
+    shared: Arc<ViewerShared>,
+    repaint: Repaint,
+}
+
+/// Minimum interval between status refreshes while serving commands.
+const MEDIA_STATUS_INTERVAL: Duration = Duration::from_millis(250);
+
+impl Media {
+    fn new(shared: Arc<ViewerShared>, repaint: Repaint) -> Self {
+        Self {
+            link: Mutex::new(None),
+            mounts: Mutex::new(Vec::new()),
+            shared,
+            repaint,
+        }
+    }
+
+    fn set(&self, kind: MediaKind, update: impl FnOnce(&mut MediaStatus)) {
+        set_status(&self.shared, &self.repaint, |status| {
+            update(status.media_mut(kind))
+        });
+    }
+
+    fn mount(self: &Arc<Self>, kind: MediaKind, path: PathBuf, writable: bool) {
+        self.unmount(kind);
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let writable = writable && kind == MediaKind::Floppy;
+        self.set(kind, |media| {
+            *media = MediaStatus {
+                image: Some(name),
+                writable,
+                ..Default::default()
+            }
+        });
+        self.mounts.lock().unwrap().push(Mount {
+            kind,
+            path,
+            writable,
+            generation: 0,
+            stream: None,
+        });
+        self.start(kind);
+    }
+
+    fn unmount(&self, kind: MediaKind) {
+        let removed = {
+            let mut mounts = self.mounts.lock().unwrap();
+            let index = mounts.iter().position(|mount| mount.kind == kind);
+            index.map(|index| mounts.remove(index))
+        };
+        if let Some(stream) = removed.and_then(|mount| mount.stream) {
+            let _ = stream.shutdown(Shutdown::Both);
+            info!(kind = kind.label(), "media unmounted");
+        }
+        self.set(kind, |media| *media = MediaStatus::default());
+    }
+
+    /// A console session is up: (re)connect every wanted image.
+    fn link_up(self: &Arc<Self>, link: Link) {
+        *self.link.lock().unwrap() = Some(link);
+        let kinds: Vec<MediaKind> = self
+            .mounts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|mount| mount.kind)
+            .collect();
+        for kind in kinds {
+            self.start(kind);
+        }
+    }
+
+    /// The console session ended: close tokend and the media connections,
+    /// keeping the mounts for the next session.
+    fn link_down(&self) {
+        if let Some(link) = self.link.lock().unwrap().take() {
+            link.tokend.close();
+        }
+        for mount in self.mounts.lock().unwrap().iter_mut() {
+            if let Some(stream) = mount.stream.take() {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
+    fn start(self: &Arc<Self>, kind: MediaKind) {
+        let started = {
+            let mut mounts = self.mounts.lock().unwrap();
+            mounts
+                .iter_mut()
+                .find(|mount| mount.kind == kind)
+                .map(|mount| {
+                    mount.generation += 1;
+                    (mount.path.clone(), mount.writable, mount.generation)
+                })
+        };
+        let Some((path, writable, generation)) = started else {
+            return;
+        };
+        if self.link.lock().unwrap().is_none() {
+            return;
+        }
+        let media = self.clone();
+        let spawned = thread::Builder::new()
+            .name(format!("ilom-{}", kind.label()))
+            .spawn(move || {
+                let result = media.run_mount(kind, &path, writable, generation);
+                media.finished(kind, generation, result);
+            });
+        if let Err(error) = spawned {
+            self.set(kind, |media| media.error = Some(format!("{error}")));
+        }
+    }
+
+    fn is_current(&self, kind: MediaKind, generation: u64) -> bool {
+        self.mounts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|mount| mount.kind == kind && mount.generation == generation)
+    }
+
+    fn run_mount(
+        &self,
+        kind: MediaKind,
+        path: &std::path::Path,
+        writable: bool,
+        generation: u64,
+    ) -> Result<()> {
+        let mut image = MediaImage::open(path, kind, writable)?;
+        let (host, token) = {
+            let mut link = self.link.lock().unwrap();
+            let link = link.as_mut().context("not connected")?;
+            let token = link
+                .tokend
+                .redirection_token()
+                .context("request a media token from tokend")?;
+            (link.host.clone(), token)
+        };
+        let mut channel = MediaChannel::connect(&host, kind, &token)?;
+        {
+            let mut mounts = self.mounts.lock().unwrap();
+            match mounts
+                .iter_mut()
+                .find(|mount| mount.kind == kind && mount.generation == generation)
+            {
+                Some(mount) => mount.stream = Some(channel.try_clone_stream()?),
+                // Unmounted while connecting.
+                None => {
+                    channel.close();
+                    return Ok(());
+                }
+            }
+        }
+        self.set(kind, |media| {
+            media.active = true;
+            media.error = None;
+        });
+        let mut last = Instant::now();
+        channel.serve(&mut image, |stats| {
+            if last.elapsed() >= MEDIA_STATUS_INTERVAL && self.is_current(kind, generation) {
+                last = Instant::now();
+                let stats = *stats;
+                self.set(kind, |media| media.stats = stats);
+            }
+        })
+    }
+
+    fn finished(&self, kind: MediaKind, generation: u64, result: Result<()>) {
+        let still_wanted = {
+            let mut mounts = self.mounts.lock().unwrap();
+            match mounts
+                .iter_mut()
+                .find(|mount| mount.kind == kind && mount.generation == generation)
+            {
+                Some(mount) => {
+                    mount.stream = None;
+                    true
+                }
+                None => false,
+            }
+        };
+        if !still_wanted {
+            return;
+        }
+        let connected = self.link.lock().unwrap().is_some();
+        let message = match result {
+            Ok(()) if !connected => "waiting for the console to reconnect".to_string(),
+            Ok(()) => "the SP closed the media connection".to_string(),
+            Err(error) => format!("{error:#}"),
+        };
+        warn!(kind = kind.label(), %message, "media redirection ended");
+        self.set(kind, |media| {
+            media.active = false;
+            media.error = Some(message);
+        });
     }
 }

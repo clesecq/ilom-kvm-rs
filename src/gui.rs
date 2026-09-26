@@ -8,7 +8,11 @@ use eframe::egui::{
 use crate::{
     hid,
     keymap::{self, Layout},
-    viewer::{ConnectionState, DecodedFrame, Source, ViewerCommand, ViewerHandle, spawn_viewer},
+    scsi::MediaKind,
+    viewer::{
+        ConnectionState, DecodedFrame, MediaStatus, Source, ViewerCommand, ViewerHandle,
+        spawn_viewer,
+    },
 };
 
 const USB_LEFT_CTRL: u8 = 0x01;
@@ -177,6 +181,8 @@ pub struct ViewerApp {
     notice: Option<String>,
     capture_dir: PathBuf,
     disconnect_requested: bool,
+    /// Let the host write to the next floppy image mounted.
+    floppy_writable: bool,
 }
 
 impl ViewerApp {
@@ -195,6 +201,7 @@ impl ViewerApp {
             notice: None,
             capture_dir,
             disconnect_requested: false,
+            floppy_writable: false,
         }
     }
 
@@ -385,6 +392,77 @@ impl ViewerApp {
         self.send(ViewerCommand::TypeStrokes(strokes));
     }
 
+    fn media_menu(&mut self, ui: &mut egui::Ui, kind: MediaKind, media: &MediaStatus) {
+        let title = match kind {
+            MediaKind::Cdrom => "CD-ROM",
+            MediaKind::Floppy => "Floppy/USB",
+        };
+        let label = match (&media.image, media.active) {
+            (Some(name), true) => format!("💿 {title}: {name}"),
+            (Some(name), false) => format!("⏳ {title}: {name}"),
+            (None, _) => format!("{title}…"),
+        };
+        let mut text = egui::RichText::new(label);
+        if media.error.is_some() {
+            text = text.color(Color32::from_rgb(235, 90, 90));
+        } else if media.active {
+            text = text.color(Color32::from_rgb(80, 200, 120));
+        }
+        ui.menu_button(text, |ui| {
+            if kind == MediaKind::Floppy {
+                ui.checkbox(&mut self.floppy_writable, "Allow the host to write");
+            }
+            let pick = if media.image.is_some() {
+                "Change image…"
+            } else {
+                "Mount image…"
+            };
+            if ui.button(pick).clicked() {
+                ui.close();
+                let dialog = rfd::FileDialog::new().set_title(format!("Mount {title} image"));
+                let dialog = match kind {
+                    MediaKind::Cdrom => dialog.add_filter("ISO image", &["iso"]),
+                    MediaKind::Floppy => dialog.add_filter("Disk image", &["img", "ima", "bin"]),
+                };
+                if let Some(path) = dialog.add_filter("All files", &["*"]).pick_file() {
+                    self.send(ViewerCommand::Mount {
+                        kind,
+                        path,
+                        writable: self.floppy_writable,
+                    });
+                }
+            }
+            if media.image.is_some() && ui.button("Unmount").clicked() {
+                ui.close();
+                self.send(ViewerCommand::Unmount(kind));
+            }
+            if media.image.is_some() {
+                ui.separator();
+                ui.label(if media.active {
+                    "Redirected to the host"
+                } else {
+                    "Connecting…"
+                });
+                if media.writable {
+                    ui.label("Host writes allowed");
+                }
+                ui.label(format!(
+                    "{} commands, {} read, {} written",
+                    media.stats.commands,
+                    human_bytes(media.stats.bytes_read),
+                    human_bytes(media.stats.bytes_written)
+                ));
+            }
+            if let Some(error) = &media.error {
+                ui.colored_label(Color32::from_rgb(235, 90, 90), error);
+            }
+        })
+        .response
+        .on_hover_text(format!(
+            "Redirect a local image to the host's virtual {title} drive"
+        ));
+    }
+
     fn save_screenshot(&mut self) {
         let Some(frame) = self.displayed_frame.as_ref() else {
             self.notice = Some("No frame is available yet".into());
@@ -512,6 +590,10 @@ impl eframe::App for ViewerApp {
                     .response
                     .on_hover_text("Keyboard layout configured on the host (used for pasting)");
                 ui.separator();
+                for kind in [MediaKind::Cdrom, MediaKind::Floppy] {
+                    self.media_menu(ui, kind, status.media(kind));
+                }
+                ui.separator();
                 if ui.button("Screenshot").clicked() {
                     self.save_screenshot();
                 }
@@ -589,6 +671,21 @@ impl Drop for ViewerApp {
     fn drop(&mut self) {
         self.release_input();
         self.handle.stop_and_wait();
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
