@@ -8,6 +8,7 @@ description = "Java-free native client for the Oracle ILOM Remote System Console
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+dotenvy = "0.15.7"
 hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 md-5 = { version = "0.11.0", default-features = false }

@@ -8,6 +8,7 @@ use ilom_kvm::{
     video::{VideoEvent, VideoSession},
     tls::CertPolicy,
     tokend::Tokend,
+    web::WebSession,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -26,10 +27,39 @@ enum Command {
 }
 
 #[derive(clap::Args)]
-struct ProbeArgs {
+struct Target {
     /// Path to a `jnlpgenerator-*` file downloaded from the ILOM web UI.
-    #[arg(long)]
-    jnlp: PathBuf,
+    #[arg(long, conflicts_with = "host")]
+    jnlp: Option<PathBuf>,
+    /// ILOM address; logs into the web UI to fetch a fresh JNLP.
+    #[arg(long, env = "ILOM_HOST")]
+    host: Option<String>,
+    #[arg(long, env = "ILOM_USER", default_value = "root")]
+    user: String,
+}
+
+impl Target {
+    /// Returns launch arguments plus the web session to close afterwards.
+    fn resolve(&self) -> Result<(ConsoleArgs, Option<WebSession>)> {
+        if let Some(path) = &self.jnlp {
+            return Ok((load_jnlp(path)?, None));
+        }
+        let host = self
+            .host
+            .as_deref()
+            .context("pass --jnlp or --host (or set ILOM_HOST)")?;
+        let password = std::env::var("ILOM_PASSWORD")
+            .context("set ILOM_PASSWORD in the environment or .env")?;
+        let web = WebSession::login(host, CertPolicy::Insecure, &self.user, &password)?;
+        let args = web.console_args()?;
+        Ok((args, Some(web)))
+    }
+}
+
+#[derive(clap::Args)]
+struct ProbeArgs {
+    #[command(flatten)]
+    target: Target,
     /// Number of decoded frames to save as PNG files.
     #[arg(long, default_value_t = 1)]
     frames: u32,
@@ -38,6 +68,7 @@ struct ProbeArgs {
 }
 
 fn main() -> Result<()> {
+    let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .without_time()
@@ -64,7 +95,7 @@ fn cert_policy(args: &ConsoleArgs) -> CertPolicy {
 }
 
 fn probe(args: ProbeArgs) -> Result<()> {
-    let console = load_jnlp(&args.jnlp)?;
+    let (console, web) = args.target.resolve()?;
     info!(host = %console.host, user = %console.username, depth = console.color_depth, "loaded JNLP");
     let mut tokend = Tokend::connect(
         &console.host,
@@ -109,5 +140,8 @@ fn probe(args: ProbeArgs) -> Result<()> {
     })();
     video.stop();
     tokend.close();
+    if let Some(web) = web {
+        web.logout()?;
+    }
     result
 }

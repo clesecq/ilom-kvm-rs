@@ -4,6 +4,7 @@
 use std::io::{Read, Write};
 
 use anyhow::{Context, Result, bail};
+use tracing::trace;
 
 pub const HEADER_LEN: usize = 7;
 const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
@@ -59,9 +60,21 @@ impl Packet {
     }
 
     pub fn read_from(reader: &mut impl Read) -> Result<Self> {
+        Self::read_with(reader, |_, announced| announced)
+    }
+
+    /// Reads one packet, letting `payload_len(kind, announced)` pick the real
+    /// payload size. Some SP replies announce a length that does not match
+    /// what they send (the vendor client parses fixed layouts instead).
+    pub fn read_with(
+        reader: &mut impl Read,
+        payload_len: impl Fn(u8, usize) -> usize,
+    ) -> Result<Self> {
         let mut header = [0_u8; HEADER_LEN];
         reader.read_exact(&mut header).context("read IVTP header")?;
-        let len = u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize;
+        let announced = u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize;
+        let len = payload_len(header[0], announced);
+        trace!(kind = header[0], announced, len, status = u16::from_le_bytes([header[5], header[6]]), "IVTP header");
         if len > MAX_PAYLOAD {
             bail!("IVTP packet type {} announces {len} bytes", header[0]);
         }

@@ -197,6 +197,7 @@ impl VideoSession {
         let token = tokend.redirection_token()?;
         Packet::new(kind::TOKEN_AUTH, token.to_vec()).write_to(&mut stream)?;
         let reply = expect(&mut stream, kind::TOKEN_AUTH, "token authentication")?;
+        debug!(status = reply.status, payload = %hex::encode(&reply.payload), "token reply");
         if reply.status != 0 {
             bail!("video token authentication failed with status {}", reply.status);
         }
@@ -207,7 +208,8 @@ impl VideoSession {
         let mut request = fixed_field(username.as_bytes(), USERNAME_FIELD);
         request.resize(USERNAME_FIELD + salt_len + CHALLENGE_LEN, 0);
         Packet::new(kind::GET_CHALLENGE, request).write_to(&mut stream)?;
-        let challenge = Packet::read_from(&mut stream).context("read login challenge")?;
+        let challenge = read_packet(&mut stream, salt_len).context("read login challenge")?;
+        debug!(status = challenge.status, payload = %hex::encode(&challenge.payload), "login challenge");
         if challenge.status == LOGIN_DENIED || challenge.status == 2 {
             bail!("video login denied for {username}");
         }
@@ -220,7 +222,7 @@ impl VideoSession {
         let mut login = fixed_field(username.as_bytes(), USERNAME_FIELD);
         login.extend_from_slice(&crypto::challenge_digest(&hash, nonce));
         Packet::new(kind::LOGIN, login).write_to(&mut stream)?;
-        let reply = Packet::read_from(&mut stream).context("read login result")?;
+        let reply = read_packet(&mut stream, salt_len).context("read login result")?;
         if reply.status != 0 {
             bail!("video login rejected with status {}", reply.status);
         }
@@ -237,13 +239,18 @@ impl VideoSession {
         })
     }
 
+    fn salt_len(&self) -> usize {
+        if self.server_version == 1 { 8 } else { 12 }
+    }
+
     pub fn try_clone_stream(&self) -> Result<TcpStream> {
         Ok(self.stream.try_clone()?)
     }
 
     pub fn next_event(&mut self) -> Result<VideoEvent> {
         loop {
-            let packet = Packet::read_from(&mut self.stream)?;
+            let salt_len = self.salt_len();
+            let packet = read_packet(&mut self.stream, salt_len)?;
             match packet.kind {
                 kind::VIDEO_FRAGMENT => match self.assembler.push(&packet.payload) {
                     Ok(Some(frame)) => return Ok(VideoEvent::Frame(frame)),
@@ -276,8 +283,26 @@ impl VideoSession {
     }
 }
 
+/// Payload sizes of fixed-layout server packets. The SP sometimes announces
+/// a length that includes the header (e.g. 27 for the 20-byte token reply).
+fn video_payload_len(kind: u8, announced: usize, salt_len: usize) -> usize {
+    match kind {
+        kind::TOKEN_AUTH => 20,
+        kind::LOGIN | kind::BLANK_SCREEN => 0,
+        kind::GET_CHALLENGE => USERNAME_FIELD + salt_len + CHALLENGE_LEN,
+        kind::SERVER_INFO => 2,
+        kind::GET_USB_MOUSE_MODE | kind::ACTIVE_CLIENTS => 1,
+        kind::GET_VIDEO_ENGINE_CONFIGS => 8,
+        _ => announced,
+    }
+}
+
+fn read_packet(stream: &mut TcpStream, salt_len: usize) -> Result<Packet> {
+    Packet::read_with(stream, |kind, announced| video_payload_len(kind, announced, salt_len))
+}
+
 fn expect(stream: &mut TcpStream, expected: u8, what: &str) -> Result<Packet> {
-    let packet = Packet::read_from(stream).with_context(|| format!("read {what}"))?;
+    let packet = read_packet(stream, 12).with_context(|| format!("read {what}"))?;
     if packet.kind != expected {
         bail!(
             "expected {what} (type {expected}), got type {} status {}",

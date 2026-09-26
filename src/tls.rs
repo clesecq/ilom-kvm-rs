@@ -47,12 +47,7 @@ pub fn connect(host: &str, port: u16, policy: CertPolicy) -> Result<TlsStream<Tc
         .map_err(|error| anyhow!("TLS handshake with {host}:{port} failed: {error}"))?;
 
     if let CertPolicy::Pinned(expected) = policy {
-        let certificate = stream
-            .peer_certificate()
-            .context("read peer certificate")?
-            .ok_or_else(|| anyhow!("{host}:{port} sent no certificate"))?;
-        let der = certificate.to_der().context("encode peer certificate")?;
-        let actual: [u8; 32] = Sha256::digest(&der).into();
+        let actual = peer_fingerprint(&stream)?;
         if actual != expected {
             bail!(
                 "certificate fingerprint mismatch on {host}:{port}: expected {}, got {}",
@@ -62,6 +57,16 @@ pub fn connect(host: &str, port: u16, policy: CertPolicy) -> Result<TlsStream<Tc
         }
     }
     Ok(stream)
+}
+
+/// SHA-256 over the DER encoding of the peer certificate.
+pub fn peer_fingerprint(stream: &TlsStream<TcpStream>) -> Result<[u8; 32]> {
+    let certificate = stream
+        .peer_certificate()
+        .context("read peer certificate")?
+        .ok_or_else(|| anyhow!("peer sent no certificate"))?;
+    let der = certificate.to_der().context("encode peer certificate")?;
+    Ok(Sha256::digest(&der).into())
 }
 
 pub fn format_fingerprint(bytes: &[u8]) -> String {

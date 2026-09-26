@@ -5,3 +5,4 @@ pub mod jnlp;
 pub mod tls;
 pub mod tokend;
 pub mod video;
+pub mod web;
