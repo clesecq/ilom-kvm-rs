@@ -207,8 +207,7 @@ fn probe(args: ProbeArgs) -> Result<()> {
                 tracing::debug!(bytes = %hex::encode(&buffer[..n]), "HID socket data");
             }
         });
-        hid.send_keyboard(0x02, &[])?;
-        hid.send_keyboard(0, &[])?;
+        hid.nudge_leds()?;
         hid.send_absolute_mouse(0, 512, 384, 1024, 768)?;
         info!("sent HID test reports");
         Some(hid)

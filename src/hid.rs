@@ -322,6 +322,17 @@ impl HidSession {
         Ok(())
     }
 
+    /// Presses NumLock twice (net no change) like the vendor client does
+    /// after connecting; the host answers with IUSB LED status packets.
+    pub fn nudge_leds(&mut self) -> Result<()> {
+        const NUM_LOCK: u8 = 0x53;
+        for _ in 0..2 {
+            self.send_keystroke(0, NUM_LOCK)?;
+            self.send_keyboard(0, &[])?;
+        }
+        Ok(())
+    }
+
     /// Stream for reading IUSB status / LED packets on another thread.
     pub fn try_clone_stream(&self) -> Result<TcpStream> {
         Ok(self.stream.try_clone()?)
@@ -368,6 +379,23 @@ mod tests {
         assert_eq!(u32::from_le_bytes(packet[12..16].try_into().unwrap()), 17);
         assert_eq!(packet[28], 1);
         assert_eq!(packet[IUSB_HEADER_LEN], 8);
+    }
+
+    /// Reference vector produced by the vendor Java classes for user
+    /// `root-sp-5` and the tokend challenge data below (Enter, keybreak).
+    #[test]
+    fn encrypted_keystroke_matches_vendor_client() {
+        let data = hex::decode("acdedf699213b500038e5a3728851a2aa9655571efa0f7fd4120583f6193820f").unwrap();
+        let cipher = HidCipher {
+            key: crypto::hid_aes_key("root-sp-5", &data),
+            iv: data[..16].try_into().unwrap(),
+        };
+        assert_eq!(hex::encode(cipher.key), "c9d4b51fed21836f0ce33d2579e953ca");
+        let packet = keyboard_packet(0, 0, &[0x28], true, Some(&cipher));
+        assert_eq!(
+            hex::encode(packet),
+            "49555342202020200100205811000000003010800200000000000000010000000807f5d0763b51e0698e214025e2f0400b"
+        );
     }
 
     #[test]

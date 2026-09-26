@@ -273,8 +273,13 @@ fn session(
     sockets.lock().unwrap().push(video.try_clone_stream()?);
 
     match HidSession::connect(&console.host, &console.username, &mut tokend) {
-        Ok(hid) => {
+        Ok(mut hid) => {
             sockets.lock().unwrap().push(hid.try_clone_stream()?);
+            // The vendor client toggles NumLock twice after connecting,
+            // which makes the host report its LED state.
+            if let Err(error) = hid.nudge_leds() {
+                warn!(%error, "LED nudge failed");
+            }
             let absolute = hid.absolute;
             *hid_slot.lock().unwrap() = Some(hid);
             set_status(shared, repaint, |status| {
