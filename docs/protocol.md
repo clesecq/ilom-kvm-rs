@@ -99,6 +99,10 @@ repeat the per-session group.
 
 **The secret is single-use.** Each launch needs a newly generated JNLP.
 
+If arguments 4 and 5 are missing, nothing is left to pin the TLS channels
+against. A client can refuse to connect or connect without verification.
+`ilom-kvm-rs` connects without verification and logs a warning.
+
 ## 3. TLS and certificate pinning
 
 - The SP offers TLS 1.2 with `AES128-GCM-SHA256` (RSA key exchange). TLS
@@ -108,6 +112,11 @@ repeat the per-session group.
   validation fails. The vendor client trusts it by comparing its SHA-256
   fingerprint (over the DER encoding) with JNLP argument 4. The web server
   on port 443 presents the same certificate.
+- The web login happens before any JNLP exists, so the port 443 certificate
+  cannot be pinned at that point. `ilom-kvm-rs` does not verify it during
+  login. It records the web certificate fingerprint and compares it with the
+  JNLP fingerprint afterwards. A mismatch only logs a warning; the console
+  channels are still pinned to the JNLP fingerprint.
 
 ## 4. Token daemon (tokend)
 
@@ -1665,6 +1674,9 @@ the socket in this mode.
 - The web server repeats the HTTP status line (`HTTP/1.0 200 OK` twice) and
   sometimes uses bare LF line endings. Strict HTTP stacks reject the
   response; use a tolerant HTTP/1.0 client that reads until EOF.
+- The SP often closes the HTTPS connection without a TLS `close_notify`.
+  Reading to EOF then ends with an error although the full response was
+  received. Treat that error as end of response when data was read.
 - The JNLP secret is single-use. Re-authenticating to tokend with it returns
   `0x02`. Every connection and every reconnect needs a new JNLP.
 - ILOM has few web session slots (`msg=5` on the login page when full). Log
