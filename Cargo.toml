@@ -1,0 +1,11 @@
+[package]
+name = "ilom-kvm"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Java-free native client for the Oracle ILOM Remote System Console"
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+wasmi = "0.40"
