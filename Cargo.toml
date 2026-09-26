@@ -7,5 +7,12 @@ description = "Java-free native client for the Oracle ILOM Remote System Console
 
 [dependencies]
 anyhow = "1.0"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+hex = "0.4.3"
+native-tls = "0.2.18"
+roxmltree = "0.21.1"
+sha2 = "0.11.0"
 thiserror = "2.0"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 wasmi = "0.40"
