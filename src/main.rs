@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilom_kvm::{
     codec::AspeedCodec,
+    gui::IlomApp,
+    viewer::Source,
     hid::HidSession,
     jnlp::{self, ConsoleArgs},
     video::{VideoEvent, VideoSession},
@@ -18,13 +20,32 @@ use tracing_subscriber::EnvFilter;
 #[command(version, about = "Java-free client for the Oracle ILOM Remote System Console")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Connect with a downloaded JNLP file and run protocol diagnostics.
+    /// Open the interactive console window (default).
+    Viewer(ViewerArgs),
+    /// Connect, capture frames and run protocol diagnostics.
     Probe(ProbeArgs),
+}
+
+#[derive(clap::Args, Default)]
+struct ViewerArgs {
+    /// Connect straight away with a downloaded JNLP file.
+    #[arg(long)]
+    jnlp: Option<PathBuf>,
+    /// ILOM address prefilled in the login form.
+    #[arg(long, env = "ILOM_HOST")]
+    host: Option<String>,
+    #[arg(long, env = "ILOM_USER", default_value = "root")]
+    user: String,
+    /// Connect straight away using ILOM_HOST/ILOM_USER/ILOM_PASSWORD.
+    #[arg(long)]
+    auto: bool,
+    #[arg(long, default_value = "captures")]
+    capture_dir: PathBuf,
 }
 
 #[derive(clap::Args)]
@@ -88,8 +109,50 @@ fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Probe(args) => probe(args),
+        Some(Command::Probe(args)) => probe(args),
+        Some(Command::Viewer(args)) => viewer(args),
+        None => viewer(ViewerArgs {
+            user: std::env::var("ILOM_USER").unwrap_or_else(|_| "root".into()),
+            host: std::env::var("ILOM_HOST").ok(),
+            capture_dir: "captures".into(),
+            ..Default::default()
+        }),
     }
+}
+
+fn viewer(args: ViewerArgs) -> Result<()> {
+    let password = std::env::var("ILOM_PASSWORD").ok();
+    let initial = match (&args.jnlp, args.auto) {
+        (Some(path), _) => Some(Source::Jnlp(path.clone())),
+        (None, true) => Some(Source::Web {
+            host: args.host.clone().context("--auto needs ILOM_HOST")?,
+            username: args.user.clone(),
+            password: password.clone().context("--auto needs ILOM_PASSWORD")?,
+        }),
+        (None, false) => None,
+    };
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("ILOM Remote Console")
+            .with_inner_size([1100.0, 850.0])
+            .with_min_inner_size([640.0, 480.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "ILOM Remote Console",
+        options,
+        Box::new(move |cc| {
+            Ok(Box::new(IlomApp::new(
+                args.host,
+                args.user,
+                password,
+                args.capture_dir,
+                initial,
+                &cc.egui_ctx,
+            )))
+        }),
+    )
+    .map_err(|error| anyhow::anyhow!("GUI failed: {error}"))
 }
 
 fn load_jnlp(path: &PathBuf) -> Result<ConsoleArgs> {
@@ -105,6 +168,14 @@ fn cert_policy(args: &ConsoleArgs) -> CertPolicy {
             CertPolicy::Insecure
         }
     }
+}
+
+fn is_timeout(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+        })
+    })
 }
 
 fn parse_usage(value: &str) -> Result<u8, String> {
@@ -145,11 +216,21 @@ fn probe(args: ProbeArgs) -> Result<()> {
         None
     };
     std::fs::create_dir_all(&args.output_dir)?;
+    // Frames only arrive when the host screen changes; do not wait forever.
+    video.set_read_timeout(Some(std::time::Duration::from_secs(8)))?;
     let mut codec = AspeedCodec::new()?;
     let mut saved = 0;
     let result = (|| -> Result<()> {
         while saved < args.frames {
-            match video.next_event()? {
+            let event = match video.next_event() {
+                Ok(event) => event,
+                Err(error) if is_timeout(&error) => {
+                    info!("no screen change for 8 s, stopping");
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
+            match event {
                 VideoEvent::Frame(frame) => {
                     let header = &frame.header;
                     info!(

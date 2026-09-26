@@ -235,10 +235,19 @@ impl HidSession {
                 request.resize(USERNAME_FIELD + SALT_LEN + CHALLENGE_LEN, 0);
                 let reply = exchange(&mut stream, ENCRYPTION_CHALLENGE, &request, "HID encryption challenge")?;
                 let challenge = &reply.payload[USERNAME_FIELD + SALT_LEN..];
+                let echoed = String::from_utf8_lossy(&reply.payload[..USERNAME_FIELD])
+                    .trim_end_matches('\0')
+                    .to_string();
                 let handle: [u8; 4] = challenge[..4].try_into().unwrap();
                 let data = tokend.challenge_data(&handle)?;
+                debug!(username, %echoed, challenge_data = %hex::encode(data), "HID key inputs");
+                let key_user = if std::env::var("ILOM_HID_KEY_USER").as_deref() == Ok("echo") {
+                    echoed.as_str()
+                } else {
+                    username
+                };
                 Some(HidCipher {
-                    key: crypto::hid_aes_key(username, &data),
+                    key: crypto::hid_aes_key(key_user, &data),
                     iv: data[..16].try_into().unwrap(),
                 })
             }

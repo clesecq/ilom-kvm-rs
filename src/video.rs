@@ -326,6 +326,10 @@ impl VideoSession {
         if self.server_version == 1 { 8 } else { 12 }
     }
 
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> Result<()> {
+        Ok(self.stream.set_read_timeout(timeout)?)
+    }
+
     pub fn try_clone_stream(&self) -> Result<TcpStream> {
         Ok(self.stream.try_clone()?)
     }

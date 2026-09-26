@@ -8,3 +8,5 @@ pub mod video;
 pub mod web;
 pub mod rc4;
 pub mod hid;
+pub mod gui;
+pub mod viewer;
