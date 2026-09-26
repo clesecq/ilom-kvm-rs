@@ -97,13 +97,14 @@ fn cert_policy(args: &ConsoleArgs) -> CertPolicy {
 fn probe(args: ProbeArgs) -> Result<()> {
     let (console, web) = args.target.resolve()?;
     info!(host = %console.host, user = %console.username, depth = console.color_depth, "loaded JNLP");
+    let policy = cert_policy(&console);
     let mut tokend = Tokend::connect(
         &console.host,
-        cert_policy(&console),
+        policy,
         &console.username,
         &console.secret,
     )?;
-    let mut video = VideoSession::connect(&console.host, &console.username, &mut tokend)?;
+    let mut video = VideoSession::connect(&console.host, policy, &console.username, &mut tokend)?;
     std::fs::create_dir_all(&args.output_dir)?;
     let mut codec = AspeedCodec::new()?;
     let mut saved = 0;

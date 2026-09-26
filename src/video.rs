@@ -1,4 +1,7 @@
-use std::net::TcpStream;
+use std::{
+    io::{Read, Write},
+    net::TcpStream,
+};
 
 use anyhow::{Context, Result, bail};
 use thiserror::Error;
@@ -7,12 +10,16 @@ use tracing::{debug, info, warn};
 use crate::{
     crypto,
     ivtp::{self, Packet, RedirectPacket, fixed_field, video as kind},
-    tls,
+    rc4::Rc4,
+    tls::{self, CertPolicy},
     tokend::Tokend,
 };
 
 pub const PORT: u16 = 7578;
 pub const SERIAL_PORT: u16 = 7579;
+
+pub const RC4_KEY_PORT: u16 = 5555;
+const RC4_KEY_LEN: usize = 16;
 
 pub const SERVER_AST2000: u8 = 3;
 pub const SERVER_AST2100: u8 = 4;
@@ -49,6 +56,9 @@ pub struct AstFrameHeader {
 #[derive(Debug, Clone)]
 pub struct CompressedFrame {
     pub header: AstFrameHeader,
+    /// Compressed stream. While `header.rc4_enabled` is set this holds the
+    /// whole encrypted remainder of the frame, because the keystream advances
+    /// over every byte the SP sends, not just `compressed_size`.
     pub data: Vec<u8>,
 }
 
@@ -109,10 +119,65 @@ pub fn parse_frame(frame: &[u8]) -> Result<CompressedFrame, VideoError> {
             available: data.len(),
         });
     }
+    let data = if header.rc4_enabled { data } else { &data[..size] };
     Ok(CompressedFrame {
-        data: data[..size].to_vec(),
+        data: data.to_vec(),
         header,
     })
+}
+
+/// Decrypts RC4-protected frames in place, keeping the cipher state across
+/// frames until the SP requests a reset.
+pub struct FrameDecryptor {
+    key: Option<Vec<u8>>,
+    cipher: Option<Rc4>,
+}
+
+impl FrameDecryptor {
+    pub fn new(key: Option<Vec<u8>>) -> Self {
+        Self { key, cipher: None }
+    }
+
+    pub fn decrypt(&mut self, frame: &mut CompressedFrame) -> Result<()> {
+        if !frame.header.rc4_enabled {
+            return Ok(());
+        }
+        if frame.header.rc4_reset || self.cipher.is_none() {
+            let key = self
+                .key
+                .as_deref()
+                .context("SP sent an RC4-encrypted frame but no RC4 key was negotiated")?;
+            self.cipher = Some(Rc4::new(key));
+        }
+        self.cipher.as_mut().unwrap().apply(&mut frame.data);
+        frame.data.truncate(frame.header.compressed_size as usize);
+        frame.header.rc4_enabled = false;
+        Ok(())
+    }
+}
+
+/// Fetches the dynamic RC4 video key from the SP (TLS, port 5555) using a
+/// fresh redirection token.
+fn fetch_rc4_key(host: &str, policy: CertPolicy, token: &[u8]) -> Result<Vec<u8>> {
+    let mut stream = tls::connect(host, RC4_KEY_PORT, policy).context("connect to RC4 key service")?;
+    stream.write_all(token)?;
+    let mut status = [0_u8; 1];
+    stream.read_exact(&mut status)?;
+    if status[0] != 0 {
+        bail!("RC4 key service rejected the token (status {})", status[0]);
+    }
+    stream.write_all(&[1])?;
+    let mut key = [0_u8; RC4_KEY_LEN];
+    stream.read_exact(&mut key).context("read RC4 key")?;
+    stream.write_all(&[1])?;
+    let _ = stream.shutdown();
+    // The vendor client round-trips the key through a Java String (UTF-8),
+    // which replaces invalid sequences before the bytes reach RC4.
+    let key = String::from_utf8_lossy(&key).into_owned().into_bytes();
+    if key.len() != RC4_KEY_LEN {
+        warn!("RC4 key is not plain ASCII; applying the vendor's UTF-8 conversion");
+    }
+    Ok(key)
 }
 
 fn le_u16(input: &[u8], offset: usize) -> u16 {
@@ -159,6 +224,7 @@ pub enum VideoEvent {
 pub struct VideoSession {
     stream: TcpStream,
     assembler: FrameAssembler,
+    decryptor: FrameDecryptor,
     pub server_id: u8,
     pub server_version: u8,
 }
@@ -166,7 +232,12 @@ pub struct VideoSession {
 impl VideoSession {
     /// Runs the AST2100 video handshake: device capabilities, server info,
     /// token authentication and the challenge login that follows it.
-    pub fn connect(host: &str, username: &str, tokend: &mut Tokend) -> Result<Self> {
+    pub fn connect(
+        host: &str,
+        policy: CertPolicy,
+        username: &str,
+        tokend: &mut Tokend,
+    ) -> Result<Self> {
         let mut stream = tls::connect_tcp(host, PORT).context("connect to video server")?;
 
         // ports u16 = 0, reserved = [0, 2]; the SP answers in the same layout.
@@ -227,6 +298,17 @@ impl VideoSession {
             bail!("video login rejected with status {}", reply.status);
         }
 
+        // AST2100 video is RC4-protected by default; the key comes from a
+        // separate TLS service.
+        let token = tokend.redirection_token()?;
+        let rc4_key = match fetch_rc4_key(host, policy, &token) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                warn!(%error, "could not fetch RC4 video key");
+                None
+            }
+        };
+
         Packet::new(kind::GET_USB_MOUSE_MODE, vec![0]).write_to(&mut stream)?;
         info!("video redirection started");
         // Frames may take a while when the host screen is idle.
@@ -234,6 +316,7 @@ impl VideoSession {
         Ok(Self {
             stream,
             assembler: FrameAssembler::default(),
+            decryptor: FrameDecryptor::new(rc4_key),
             server_id,
             server_version,
         })
@@ -253,7 +336,10 @@ impl VideoSession {
             let packet = read_packet(&mut self.stream, salt_len)?;
             match packet.kind {
                 kind::VIDEO_FRAGMENT => match self.assembler.push(&packet.payload) {
-                    Ok(Some(frame)) => return Ok(VideoEvent::Frame(frame)),
+                    Ok(Some(mut frame)) => {
+                        self.decryptor.decrypt(&mut frame)?;
+                        return Ok(VideoEvent::Frame(frame));
+                    }
                     Ok(None) => continue,
                     Err(error) => warn!(%error, "dropping malformed video frame"),
                 },
