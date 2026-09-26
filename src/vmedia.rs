@@ -158,6 +158,20 @@ impl MediaChannel {
                 warn!(len = request.len(), "short IUSB SCSI packet ignored");
                 continue;
             }
+            // The SP repeats the connection ACK when it tears the
+            // redirection down (seen after the video session closed). It is
+            // not a SCSI command and must not be answered.
+            if request[CDB_OFFSET] == DEVICE_REDIRECTION_ACK {
+                let status = request.get(CONNECTION_STATUS_OFFSET).copied();
+                debug!(kind = self.kind.label(), ?status, packet = %hex::encode(&request), "media ACK during redirection");
+                if status == Some(CONNECTION_ACCEPTED) {
+                    continue;
+                }
+                bail!(
+                    "the SP ended {} redirection (status {status:?})",
+                    self.kind.label()
+                );
+            }
             let cdb: [u8; CDB_LEN] = request[CDB_OFFSET..CDB_OFFSET + CDB_LEN]
                 .try_into()
                 .unwrap();
@@ -269,6 +283,38 @@ mod tests {
             [1, 0x05, 0x20, 0x00]
         );
         assert_eq!(&response[DATA_LEN_OFFSET..DATA_OFFSET], [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn repeated_ack_ends_redirection_without_reply() {
+        use std::io::Cursor;
+
+        let mut stop = request(&[DEVICE_REDIRECTION_ACK]);
+        stop.resize(DATA_OFFSET + 2, 0);
+        stop[12..16].copy_from_slice(&31_u32.to_le_bytes());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let sp = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.write_all(&stop).unwrap();
+            let mut rest = Vec::new();
+            socket.read_to_end(&mut rest).unwrap();
+            rest
+        });
+        let mut channel = MediaChannel {
+            stream: TcpStream::connect(address).unwrap(),
+            kind: MediaKind::Cdrom,
+        };
+        let mut image = MediaImage::new(
+            Box::new(Cursor::new(vec![0; 2048])),
+            2048,
+            MediaKind::Cdrom,
+            false,
+        );
+        let error = channel.serve(&mut image, |_| {}).unwrap_err();
+        assert!(format!("{error}").contains("ended CD-ROM redirection"));
+        channel.close();
+        assert!(sp.join().unwrap().is_empty());
     }
 
     #[test]
