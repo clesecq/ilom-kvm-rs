@@ -31,7 +31,9 @@ impl Tokend {
         let mut stream = tls::connect(host, PORT, policy).context("connect to tokend")?;
         let mut login = fixed_field(username, USERNAME_FIELD);
         login.extend(fixed_field(secret, PASSWORD_FIELD));
-        stream.write_all(&login).context("send tokend credentials")?;
+        stream
+            .write_all(&login)
+            .context("send tokend credentials")?;
         let mut result = [0_u8; 1];
         stream
             .read_exact(&mut result)

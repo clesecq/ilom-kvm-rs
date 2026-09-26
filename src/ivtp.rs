@@ -74,7 +74,13 @@ impl Packet {
         reader.read_exact(&mut header).context("read IVTP header")?;
         let announced = u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize;
         let len = payload_len(header[0], announced);
-        trace!(kind = header[0], announced, len, status = u16::from_le_bytes([header[5], header[6]]), "IVTP header");
+        trace!(
+            kind = header[0],
+            announced,
+            len,
+            status = u16::from_le_bytes([header[5], header[6]]),
+            "IVTP header"
+        );
         if len > MAX_PAYLOAD {
             bail!("IVTP packet type {} announces {len} bytes", header[0]);
         }
@@ -150,7 +156,9 @@ impl RedirectPacket {
         let mut extra = vec![0_u8; header_len - REDIRECT_HEADER_LEN];
         reader.read_exact(&mut extra)?;
         let mut payload = vec![0_u8; len];
-        reader.read_exact(&mut payload).context("read REDIRECT payload")?;
+        reader
+            .read_exact(&mut payload)
+            .context("read REDIRECT payload")?;
         Ok(Self {
             command: u16::from_le_bytes([header[14], header[15]]),
             status: u16::from_le_bytes([header[16], header[17]]),

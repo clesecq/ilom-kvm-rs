@@ -13,7 +13,11 @@ pub fn normalize_salt(raw: &[u8]) -> Vec<u8> {
         let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
         raw[..end].to_vec()
     } else {
-        raw.iter().copied().chain(std::iter::repeat(0)).take(2).collect()
+        raw.iter()
+            .copied()
+            .chain(std::iter::repeat(0))
+            .take(2)
+            .collect()
     }
 }
 
@@ -33,7 +37,13 @@ pub fn unix_hash(password: &str, salt: &[u8], len: usize) -> Result<Vec<u8>> {
         let mapped: String = salt
             .iter()
             .take(2)
-            .map(|b| if DES_ALPHABET.contains(b) { *b as char } else { '.' })
+            .map(|b| {
+                if DES_ALPHABET.contains(b) {
+                    *b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         let mut hashed = pwhash::unix_crypt::hash_with(mapped.as_str(), password)
             .map_err(|error| anyhow!("DES crypt failed: {error}"))?

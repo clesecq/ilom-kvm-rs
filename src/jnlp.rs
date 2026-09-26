@@ -36,7 +36,10 @@ pub fn from_arguments(arguments: &[&str]) -> Result<ConsoleArgs> {
         _ => arguments.to_vec(),
     };
     if arguments.len() < 4 {
-        bail!("expected at least 4 console arguments, got {}", arguments.len());
+        bail!(
+            "expected at least 4 console arguments, got {}",
+            arguments.len()
+        );
     }
     if arguments.len() > 6 {
         bail!("multi-session (blade) JNLP files are not supported");
@@ -67,9 +70,9 @@ pub fn from_arguments(arguments: &[&str]) -> Result<ConsoleArgs> {
 pub fn parse_fingerprint(value: &str) -> Result<[u8; 32]> {
     let digits: String = value.chars().filter(|c| *c != ':').collect();
     let bytes = hex::decode(&digits).with_context(|| format!("invalid fingerprint {value:?}"))?;
-    bytes
-        .try_into()
-        .map_err(|bytes: Vec<u8>| anyhow::anyhow!("fingerprint has {} bytes, expected 32", bytes.len()))
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        anyhow::anyhow!("fingerprint has {} bytes, expected 32", bytes.len())
+    })
 }
 
 #[cfg(test)]
@@ -102,7 +105,11 @@ MIIB
         let fingerprint = args.fingerprint.unwrap();
         assert_eq!(fingerprint[0], 0x40);
         assert_eq!(fingerprint[31], 0xb0);
-        assert!(args.certificate_pem.unwrap().starts_with("-----BEGIN CERTIFICATE-----"));
+        assert!(
+            args.certificate_pem
+                .unwrap()
+                .starts_with("-----BEGIN CERTIFICATE-----")
+        );
     }
 
     #[test]

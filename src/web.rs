@@ -172,7 +172,12 @@ fn request(
     }
     debug!(path, bytes = raw.len(), head = %String::from_utf8_lossy(&raw[..raw.len().min(60)]), "HTTP raw");
     let response = parse_response(&raw).with_context(|| format!("parse response to {path}"))?;
-    debug!(path, status = response.status, bytes = response.body.len(), "HTTP");
+    debug!(
+        path,
+        status = response.status,
+        bytes = response.body.len(),
+        "HTTP"
+    );
     Ok((response, fingerprint))
 }
 
@@ -183,7 +188,11 @@ fn parse_response(raw: &[u8]) -> Result<Response> {
         .position(|window| window == b"\r\n\r\n")
         .map(|at| (at, 4))
         .into_iter()
-        .chain(raw.windows(2).position(|window| window == b"\n\n").map(|at| (at, 2)))
+        .chain(
+            raw.windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|at| (at, 2)),
+        )
         .min_by_key(|(at, _)| *at)
         .ok_or_else(|| anyhow!("HTTP response has no header terminator"))?;
     let head = String::from_utf8_lossy(&raw[..split]);

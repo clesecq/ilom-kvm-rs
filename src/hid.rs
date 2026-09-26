@@ -81,7 +81,11 @@ fn read_reply(stream: &mut impl Read, salt_len: usize) -> Result<HidReply> {
     let command = u16::from_le_bytes([header[8], header[9]]);
     let status = u16::from_le_bytes([header[10], header[11]]);
     let announced = u32::from_le_bytes(header[12..16].try_into().unwrap());
-    let len = if status == 0 { reply_len(command, salt_len) } else { 0 };
+    let len = if status == 0 {
+        reply_len(command, salt_len)
+    } else {
+        0
+    };
     let mut payload = vec![0_u8; len];
     stream.read_exact(&mut payload)?;
     debug!(command, status, announced, payload = %hex::encode(&payload), "HID reply");
@@ -96,7 +100,10 @@ fn exchange(stream: &mut TcpStream, command: u16, payload: &[u8], what: &str) ->
     stream.write_all(&hid_command(command, payload))?;
     let reply = read_reply(stream, SALT_LEN).with_context(|| format!("read {what} reply"))?;
     if reply.command != command {
-        bail!("expected {what} reply ({command}), got command {}", reply.command);
+        bail!(
+            "expected {what} reply ({command}), got command {}",
+            reply.command
+        );
     }
     if reply.status != 0 {
         bail!("{what} failed with HID status {}", reply.status);
@@ -137,7 +144,9 @@ fn iusb_packet(
     packet.extend_from_slice(&[0, device, protocol, DIRECTION_TO_DEVICE, 2, interface, 0, 0]);
     packet.extend_from_slice(&sequence.to_le_bytes());
     packet.extend_from_slice(&[cipher.is_some() as u8, 0, 0, 0]);
-    let sum = packet.iter().fold(0_u8, |acc, byte| acc.wrapping_add(*byte));
+    let sum = packet
+        .iter()
+        .fold(0_u8, |acc, byte| acc.wrapping_add(*byte));
     packet[11] = sum.wrapping_neg();
     packet.extend_from_slice(&body);
     packet
@@ -160,7 +169,14 @@ pub fn keyboard_packet(
     for (slot, usage) in report[3..].iter_mut().zip(usages.iter().take(6)) {
         *slot = *usage;
     }
-    iusb_packet(DEVICE_KEYBOARD, PROTOCOL_KEYBOARD, 0, sequence, &report, cipher)
+    iusb_packet(
+        DEVICE_KEYBOARD,
+        PROTOCOL_KEYBOARD,
+        0,
+        sequence,
+        &report,
+        cipher,
+    )
 }
 
 /// Absolute pointer report; `x`/`y` are remote framebuffer pixels.
@@ -240,7 +256,10 @@ pub fn read_status(stream: &mut impl Read) -> Result<HidStatus> {
         stream.read_exact(&mut data)?;
         return Ok(match data.get(1) {
             Some(leds) => HidStatus::Leds(*leds),
-            None => HidStatus::Other { command: 0, status: 0 },
+            None => HidStatus::Other {
+                command: 0,
+                status: 0,
+            },
         });
     }
     if &signature == HID_SIGNATURE {
@@ -274,8 +293,16 @@ impl HidSession {
         exchange(&mut stream, TOKEN, &payload, "HID token")?;
 
         // protocol u8, ports u32, reserved[3] = [2, 0, 0]
-        let client_level: u8 = std::env::var("ILOM_HID_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
-        let devcaps = exchange(&mut stream, DEVCAPS, &[0, 0, 0, 0, 0, client_level, 0, 0], "HID devcaps")?;
+        let client_level: u8 = std::env::var("ILOM_HID_LEVEL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let devcaps = exchange(
+            &mut stream,
+            DEVCAPS,
+            &[0, 0, 0, 0, 0, client_level, 0, 0],
+            "HID devcaps",
+        )?;
         let encryption = devcaps.payload[5];
         exchange(&mut stream, PORTCAPS, &[0; 8], "HID portcaps")?;
 
@@ -284,7 +311,12 @@ impl HidSession {
             2 => {
                 let mut request = fixed_field(username.as_bytes(), USERNAME_FIELD);
                 request.resize(USERNAME_FIELD + SALT_LEN + CHALLENGE_LEN, 0);
-                let reply = exchange(&mut stream, ENCRYPTION_CHALLENGE, &request, "HID encryption challenge")?;
+                let reply = exchange(
+                    &mut stream,
+                    ENCRYPTION_CHALLENGE,
+                    &request,
+                    "HID encryption challenge",
+                )?;
                 let challenge = &reply.payload[USERNAME_FIELD + SALT_LEN..];
                 let echoed = String::from_utf8_lossy(&reply.payload[..USERNAME_FIELD])
                     .trim_end_matches('\0')
@@ -351,25 +383,36 @@ impl HidSession {
         Ok(())
     }
 
-    pub fn send_absolute_mouse(&mut self, buttons: u8, x: u32, y: u32, width: u32, height: u32) -> Result<()> {
+    pub fn send_absolute_mouse(
+        &mut self,
+        buttons: u8,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
         let sequence = self.next_sequence();
-        self.stream
-            .write_all(&absolute_mouse_packet(
-                sequence,
-                buttons,
-                x,
-                y,
-                width,
-                height,
-                self.cipher.as_ref(),
-            ))?;
+        self.stream.write_all(&absolute_mouse_packet(
+            sequence,
+            buttons,
+            x,
+            y,
+            width,
+            height,
+            self.cipher.as_ref(),
+        ))?;
         Ok(())
     }
 
     pub fn send_relative_mouse(&mut self, buttons: u8, dx: i8, dy: i8) -> Result<()> {
         let sequence = self.next_sequence();
-        self.stream
-            .write_all(&relative_mouse_packet(sequence, buttons, dx, dy, self.cipher.as_ref()))?;
+        self.stream.write_all(&relative_mouse_packet(
+            sequence,
+            buttons,
+            dx,
+            dy,
+            self.cipher.as_ref(),
+        ))?;
         Ok(())
     }
 
@@ -408,7 +451,10 @@ mod tests {
             .fold(0_u8, |acc, byte| acc.wrapping_add(*byte));
         assert_eq!(sum, 0);
         assert_eq!(u32::from_le_bytes(packet[12..16].try_into().unwrap()), 9);
-        assert_eq!(&packet[IUSB_HEADER_LEN..], &[8, 0x02, 0, 0x04, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            &packet[IUSB_HEADER_LEN..],
+            &[8, 0x02, 0, 0x04, 0, 0, 0, 0, 0]
+        );
     }
 
     #[test]
@@ -423,7 +469,10 @@ mod tests {
 
     #[test]
     fn encrypted_packet_keeps_length_byte_in_clear() {
-        let cipher = HidCipher { key: [1; 16], iv: [2; 16] };
+        let cipher = HidCipher {
+            key: [1; 16],
+            iv: [2; 16],
+        };
         let packet = keyboard_packet(0, 0, &[0x04], true, Some(&cipher));
         assert_eq!(packet.len(), IUSB_HEADER_LEN + 17);
         assert_eq!(u32::from_le_bytes(packet[12..16].try_into().unwrap()), 17);
@@ -435,7 +484,8 @@ mod tests {
     /// `root-sp-5` and the tokend challenge data below (Enter, keybreak).
     #[test]
     fn encrypted_keystroke_matches_vendor_client() {
-        let data = hex::decode("acdedf699213b500038e5a3728851a2aa9655571efa0f7fd4120583f6193820f").unwrap();
+        let data = hex::decode("acdedf699213b500038e5a3728851a2aa9655571efa0f7fd4120583f6193820f")
+            .unwrap();
         let cipher = HidCipher {
             key: crypto::hid_aes_key("root-sp-5", &data),
             iv: data[..16].try_into().unwrap(),
@@ -451,8 +501,13 @@ mod tests {
     #[test]
     fn parses_led_status_packet() {
         // Captured from the SP after a NumLock press.
-        let raw = hex::decode("4955534220202020010020d402000000003011000300000012000000000000000101").unwrap();
-        assert_eq!(read_status(&mut raw.as_slice()).unwrap(), HidStatus::Leds(LED_NUM_LOCK));
+        let raw =
+            hex::decode("4955534220202020010020d402000000003011000300000012000000000000000101")
+                .unwrap();
+        assert_eq!(
+            read_status(&mut raw.as_slice()).unwrap(),
+            HidStatus::Leds(LED_NUM_LOCK)
+        );
     }
 
     #[test]

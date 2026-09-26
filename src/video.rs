@@ -119,7 +119,11 @@ pub fn parse_frame(frame: &[u8]) -> Result<CompressedFrame, VideoError> {
             available: data.len(),
         });
     }
-    let data = if header.rc4_enabled { data } else { &data[..size] };
+    let data = if header.rc4_enabled {
+        data
+    } else {
+        &data[..size]
+    };
     Ok(CompressedFrame {
         data: data.to_vec(),
         header,
@@ -159,7 +163,8 @@ impl FrameDecryptor {
 /// Fetches the dynamic RC4 video key from the SP (TLS, port 5555) using a
 /// fresh redirection token.
 fn fetch_rc4_key(host: &str, policy: CertPolicy, token: &[u8]) -> Result<Vec<u8>> {
-    let mut stream = tls::connect(host, RC4_KEY_PORT, policy).context("connect to RC4 key service")?;
+    let mut stream =
+        tls::connect(host, RC4_KEY_PORT, policy).context("connect to RC4 key service")?;
     stream.write_all(token)?;
     let mut status = [0_u8; 1];
     stream.read_exact(&mut status)?;
@@ -249,7 +254,9 @@ impl VideoSession {
         let reserved = [caps.payload[2], caps.payload[3]];
         debug!(?reserved, "video device capabilities");
         if reserved[0] != 1 {
-            bail!("video server is not AST2000-compatible (reserved {reserved:?}); only AST2100 ILOMs are supported");
+            bail!(
+                "video server is not AST2000-compatible (reserved {reserved:?}); only AST2100 ILOMs are supported"
+            );
         }
         if reserved[1] & 0x0f == 1 {
             bail!("the maximum number of video sessions has been reached");
@@ -270,7 +277,10 @@ impl VideoSession {
         let reply = expect(&mut stream, kind::TOKEN_AUTH, "token authentication")?;
         debug!(status = reply.status, payload = %hex::encode(&reply.payload), "token reply");
         if reply.status != 0 {
-            bail!("video token authentication failed with status {}", reply.status);
+            bail!(
+                "video token authentication failed with status {}",
+                reply.status
+            );
         }
 
         // After token authentication the vendor client still logs in, using the
@@ -284,10 +294,13 @@ impl VideoSession {
         if challenge.status == LOGIN_DENIED || challenge.status == 2 {
             bail!("video login denied for {username}");
         }
-        if challenge.status != 0 || challenge.payload.len() < USERNAME_FIELD + salt_len + CHALLENGE_LEN {
+        if challenge.status != 0
+            || challenge.payload.len() < USERNAME_FIELD + salt_len + CHALLENGE_LEN
+        {
             bail!("bad login challenge (status {})", challenge.status);
         }
-        let salt = crypto::normalize_salt(&challenge.payload[USERNAME_FIELD..USERNAME_FIELD + salt_len]);
+        let salt =
+            crypto::normalize_salt(&challenge.payload[USERNAME_FIELD..USERNAME_FIELD + salt_len]);
         let nonce = &challenge.payload[USERNAME_FIELD + salt_len..][..CHALLENGE_LEN];
         let hash = crypto::unix_hash("token", &salt, crypto::MD5_CRYPT_LEN)?;
         let mut login = fixed_field(username.as_bytes(), USERNAME_FIELD);
@@ -368,7 +381,8 @@ impl VideoSession {
     }
 
     pub fn stop(mut self) {
-        let _ = Packet::new(ivtp::video::STOP_SESSION_IMMEDIATE, Vec::new()).write_to(&mut self.stream);
+        let _ =
+            Packet::new(ivtp::video::STOP_SESSION_IMMEDIATE, Vec::new()).write_to(&mut self.stream);
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 }
@@ -388,7 +402,9 @@ fn video_payload_len(kind: u8, announced: usize, salt_len: usize) -> usize {
 }
 
 fn read_packet(stream: &mut TcpStream, salt_len: usize) -> Result<Packet> {
-    Packet::read_with(stream, |kind, announced| video_payload_len(kind, announced, salt_len))
+    Packet::read_with(stream, |kind, announced| {
+        video_payload_len(kind, announced, salt_len)
+    })
 }
 
 fn expect(stream: &mut TcpStream, expected: u8, what: &str) -> Result<Packet> {

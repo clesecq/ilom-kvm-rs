@@ -19,8 +19,8 @@ use tracing::{info, warn};
 use crate::{
     codec::AspeedCodec,
     hid::{self, HidSession, HidStatus},
-    keymap,
     jnlp::{self, ConsoleArgs},
+    keymap,
     tls::CertPolicy,
     tokend::Tokend,
     video::{VideoEvent, VideoSession},
@@ -129,9 +129,21 @@ pub struct ViewerShared {
 
 #[derive(Debug)]
 pub enum ViewerCommand {
-    Keyboard { modifiers: u8, usages: Vec<u8> },
-    Keystroke { modifiers: u8, usage: u8 },
-    MouseAbsolute { buttons: u8, x: u32, y: u32, width: u32, height: u32 },
+    Keyboard {
+        modifiers: u8,
+        usages: Vec<u8>,
+    },
+    Keystroke {
+        modifiers: u8,
+        usage: u8,
+    },
+    MouseAbsolute {
+        buttons: u8,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    },
     /// Type a sequence of `(modifiers, usage)` keystrokes (clipboard paste).
     TypeStrokes(Vec<keymap::Stroke>),
     Stop,
@@ -277,7 +289,9 @@ fn session(
     let console = source.console_args()?;
     let policy = cert_policy(&console);
     let mut tokend = Tokend::connect(&console.host, policy, &console.username, &console.secret)?;
-    set_status(shared, repaint, |status| status.message = "Starting video".into());
+    set_status(shared, repaint, |status| {
+        status.message = "Starting video".into()
+    });
     let mut video = VideoSession::connect(&console.host, policy, &console.username, &mut tokend)?;
     sockets.lock().unwrap().push(video.try_clone_stream()?);
 

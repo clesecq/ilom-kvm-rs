@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use eframe::egui::{
-    self, Color32, ColorImage, Event, Key, PointerButton, Pos2, Rect, Sense,
-    TextureHandle, TextureOptions, Vec2,
+    self, Color32, ColorImage, Event, Key, PointerButton, Pos2, Rect, Sense, TextureHandle,
+    TextureOptions, Vec2,
 };
 
 use crate::{
@@ -82,7 +82,10 @@ impl IlomApp {
                             );
                             ui.add_space(14.0);
                             connect = ui
-                                .add_sized([ui.available_width(), 34.0], egui::Button::new("Connect"))
+                                .add_sized(
+                                    [ui.available_width(), 34.0],
+                                    egui::Button::new("Connect"),
+                                )
                                 .clicked()
                                 || (password_response.lost_focus()
                                     && ui.input(|input| input.key_pressed(Key::Enter)));
@@ -360,14 +363,23 @@ impl ViewerApp {
         };
         const MAX_PASTE: usize = 10_000;
         if text.chars().count() > MAX_PASTE {
-            self.notice = Some(format!("Clipboard text is longer than {MAX_PASTE} characters"));
+            self.notice = Some(format!(
+                "Clipboard text is longer than {MAX_PASTE} characters"
+            ));
             return;
         }
         let (strokes, skipped) = keymap::text_to_strokes(self.layout, &text);
-        let mut notice = format!("Typing {} characters ({})", strokes.len(), self.layout.label());
+        let mut notice = format!(
+            "Typing {} characters ({})",
+            strokes.len(),
+            self.layout.label()
+        );
         if !skipped.is_empty() {
             let sample: String = skipped.iter().take(10).collect();
-            notice.push_str(&format!("; skipped {} unsupported: {sample:?}", skipped.len()));
+            notice.push_str(&format!(
+                "; skipped {} unsupported: {sample:?}",
+                skipped.len()
+            ));
         }
         self.notice = Some(notice);
         self.send(ViewerCommand::TypeStrokes(strokes));
@@ -455,11 +467,20 @@ impl eframe::App for ViewerApp {
                         });
                         let clicked = ui
                             .add(egui::Button::new(text).selected(on))
-                            .on_hover_text(format!("Host {label} lock is {}; click to toggle", if on { "on" } else { "off" }))
+                            .on_hover_text(format!(
+                                "Host {label} lock is {}; click to toggle",
+                                if on { "on" } else { "off" }
+                            ))
                             .clicked();
                         if clicked {
-                            self.send(ViewerCommand::Keystroke { modifiers: 0, usage });
-                            self.send(ViewerCommand::Keyboard { modifiers: 0, usages: Vec::new() });
+                            self.send(ViewerCommand::Keystroke {
+                                modifiers: 0,
+                                usage,
+                            });
+                            self.send(ViewerCommand::Keyboard {
+                                modifiers: 0,
+                                usages: Vec::new(),
+                            });
                         }
                     }
                     ui.separator();

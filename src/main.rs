@@ -5,19 +5,22 @@ use clap::{Parser, Subcommand};
 use ilom_kvm::{
     codec::AspeedCodec,
     gui::IlomApp,
-    viewer::Source,
     hid::HidSession,
     jnlp::{self, ConsoleArgs},
-    video::{VideoEvent, VideoSession},
     tls::CertPolicy,
     tokend::Tokend,
+    video::{VideoEvent, VideoSession},
+    viewer::Source,
     web::WebSession,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(version, about = "Java-free client for the Oracle ILOM Remote System Console")]
+#[command(
+    version,
+    about = "Java-free client for the Oracle ILOM Remote System Console"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -173,7 +176,10 @@ fn cert_policy(args: &ConsoleArgs) -> CertPolicy {
 fn is_timeout(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
-            matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
         })
     })
 }
@@ -187,12 +193,7 @@ fn probe(args: ProbeArgs) -> Result<()> {
     let console = args.target.resolve()?;
     info!(host = %console.host, user = %console.username, depth = console.color_depth, "loaded JNLP");
     let policy = cert_policy(&console);
-    let mut tokend = Tokend::connect(
-        &console.host,
-        policy,
-        &console.username,
-        &console.secret,
-    )?;
+    let mut tokend = Tokend::connect(&console.host, policy, &console.username, &console.secret)?;
     let mut video = VideoSession::connect(&console.host, policy, &console.username, &mut tokend)?;
     let mut hid = if args.hid {
         let mut hid = HidSession::connect(&console.host, &console.username, &mut tokend)?;
