@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use eframe::egui::{
-    self, Color32, ColorImage, Event, Key, Modifiers, PointerButton, Pos2, Rect, Sense,
+    self, Color32, ColorImage, Event, Key, PointerButton, Pos2, Rect, Sense,
     TextureHandle, TextureOptions, Vec2,
 };
 
@@ -253,9 +253,10 @@ impl ViewerApp {
             return;
         }
 
-        let current_modifiers = ctx.input(|input| usb_modifiers(input.modifiers));
-        let mut changed = current_modifiers != self.modifiers;
-        self.modifiers = current_modifiers;
+        // Modifiers come from physical key events so that left and right
+        // keys stay distinct: AltGr must reach the host as Right Alt, which
+        // egui's merged `Modifiers` (and winit on Linux) cannot express.
+        let mut changed = false;
         for event in events {
             if let Event::Key {
                 key,
@@ -267,7 +268,18 @@ impl ViewerApp {
             {
                 // USB usages name physical positions; the host applies its
                 // own layout, so prefer the physical key when available.
-                let Some(usage) = key_to_usage(physical_key.unwrap_or(key)) else {
+                let key = physical_key.unwrap_or(key);
+                if let Some(bit) = modifier_bit(key) {
+                    let modifiers = if pressed {
+                        self.modifiers | bit
+                    } else {
+                        self.modifiers & !bit
+                    };
+                    changed |= modifiers != self.modifiers;
+                    self.modifiers = modifiers;
+                    continue;
+                }
+                let Some(usage) = key_to_usage(key) else {
                     continue;
                 };
                 if pressed {
@@ -482,11 +494,19 @@ impl Drop for ViewerApp {
     }
 }
 
-fn usb_modifiers(modifiers: Modifiers) -> u8 {
-    u8::from(modifiers.ctrl)
-        | (u8::from(modifiers.shift) << 1)
-        | (u8::from(modifiers.alt) << 2)
-        | (u8::from(modifiers.mac_cmd) << 3)
+/// USB HID modifier byte bit for a physical modifier key.
+fn modifier_bit(key: Key) -> Option<u8> {
+    Some(match key {
+        Key::ControlLeft => 0x01,
+        Key::ShiftLeft => 0x02,
+        Key::AltLeft => 0x04,
+        Key::SuperLeft => 0x08,
+        Key::ControlRight => 0x10,
+        Key::ShiftRight => 0x20,
+        Key::AltRight => 0x40,
+        Key::SuperRight => 0x80,
+        _ => return None,
+    })
 }
 
 fn key_to_usage(key: Key) -> Option<u8> {
@@ -565,6 +585,8 @@ fn key_to_usage(key: Key) -> Option<u8> {
         Key::ArrowLeft => 0x50,
         Key::ArrowDown => 0x51,
         Key::ArrowUp => 0x52,
+        // ISO key left of Z (`<>` on AZERTY/QWERTZ).
+        Key::IntlBackslash => 0x64,
         _ => return None,
     })
 }
@@ -582,12 +604,11 @@ mod tests {
     }
 
     #[test]
-    fn modifiers_map_to_usb_bits() {
-        let modifiers = Modifiers {
-            ctrl: true,
-            alt: true,
-            ..Default::default()
-        };
-        assert_eq!(usb_modifiers(modifiers), USB_LEFT_CTRL | USB_LEFT_ALT);
+    fn modifier_keys_map_to_usb_bits() {
+        assert_eq!(modifier_bit(Key::ControlLeft), Some(USB_LEFT_CTRL));
+        assert_eq!(modifier_bit(Key::AltLeft), Some(USB_LEFT_ALT));
+        assert_eq!(modifier_bit(Key::AltRight), Some(0x40));
+        assert_eq!(modifier_bit(Key::A), None);
+        assert_eq!(key_to_usage(Key::IntlBackslash), Some(0x64));
     }
 }
