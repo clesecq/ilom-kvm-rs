@@ -4,8 +4,7 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,6 +14,8 @@ jobs:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -41,16 +42,15 @@ jobs:
           fi
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        uses: ./.github/actions/linux-deps
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: ${{ matrix.target }}
+        uses: $/.github/actions/linux-deps
       - run: cargo test --release --locked
       - run: cargo build --release --locked
       - name: Package
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          name="ilom-kvm-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="ilom-kvm-${GITHUB_REF_NAME}-${TARGET}"
           mkdir -p "dist/$name"
           cp README.md LICENSE "dist/$name/"
           cp third_party/aspeed_codec/LICENSE "dist/$name/LICENSE-aspeed_codec"
@@ -75,13 +75,24 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          files: dist/*
-          generate_release_notes: true
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
