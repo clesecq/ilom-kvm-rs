@@ -6,7 +6,7 @@ license = "MIT"
 description = "Java-free native client for the Oracle ILOM Remote System Console"
 
 [dependencies]
-aes = "0.8"
+aes = "0.9"
 anyhow = "1.0"
 arboard = { version = "3", features = ["wayland-data-control"] }
 cbc = { version = "0.1", features = ["alloc", "block-padding"] }
