@@ -123,8 +123,8 @@ pub fn hid_aes_key(username: &str, challenge_data: &[u8]) -> [u8; 16] {
 
 /// AES-128-CBC with PKCS#7 padding, restarting from `iv` for every message.
 pub fn aes_cbc_encrypt(key: &[u8; 16], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
-    use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
-    cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into()).encrypt_padded_vec_mut::<Pkcs7>(data)
+    use cbc::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
+    cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into()).encrypt_padded_vec::<Pkcs7>(data)
 }
 
 #[cfg(test)]
