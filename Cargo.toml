@@ -24,7 +24,7 @@ sha2 = "0.11.0"
 thiserror = "2.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-wasmi = "0.40"
+wasmi = "2.0"
 
 [patch.crates-io]
 egui-winit = { path = "third_party/egui-winit" }
