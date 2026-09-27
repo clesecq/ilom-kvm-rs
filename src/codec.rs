@@ -49,7 +49,7 @@ impl AspeedCodec {
                     }
                     let extra = requested - current;
                     let pages = extra.div_ceil(65536);
-                    let Ok(pages) = u32::try_from(pages) else {
+                    let Ok(pages) = u64::try_from(pages) else {
                         return 0;
                     };
                     if memory.grow(&mut caller, pages).is_ok() {
@@ -62,10 +62,8 @@ impl AspeedCodec {
             .context("define Emscripten memory growth import")?;
 
         let instance = linker
-            .instantiate(&mut store, &module)
-            .context("instantiate ASPEED codec")?
-            .start(&mut store)
-            .context("start ASPEED codec")?;
+            .instantiate_and_start(&mut store, &module)
+            .context("instantiate ASPEED codec")?;
         let memory = instance
             .get_memory(&store, "b")
             .ok_or_else(|| anyhow!("ASPEED codec does not export memory 'b'"))?;
