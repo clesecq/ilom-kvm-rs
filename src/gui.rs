@@ -145,14 +145,14 @@ impl IlomApp {
                         .show(ui, |ui| {
                             ui.set_width(420.0);
                             ui.label("ILOM address");
-                            ui.add(
+                            let host_response = ui.add(
                                 egui::TextEdit::singleline(&mut self.host)
                                     .hint_text("192.0.2.10")
                                     .desired_width(f32::INFINITY),
                             );
                             ui.add_space(10.0);
                             ui.label("Username");
-                            ui.add(
+                            let username_response = ui.add(
                                 egui::TextEdit::singleline(&mut self.username)
                                     .desired_width(f32::INFINITY),
                             );
@@ -170,7 +170,10 @@ impl IlomApp {
                                     egui::Button::new("Connect"),
                                 )
                                 .clicked()
-                                || (password_response.lost_focus()
+                                // Enter in any field submits, like a web form.
+                                || ([host_response, username_response, password_response]
+                                    .iter()
+                                    .any(egui::Response::lost_focus)
                                     && ui.input(|input| input.key_pressed(Key::Enter)));
                             ui.add_space(6.0);
                             open_jnlp = ui
