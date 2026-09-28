@@ -269,7 +269,8 @@ pub struct ViewerApp {
     /// Unsent relative-mode motion, in host pixels.
     relative_motion: Vec2,
     cursor_grabbed: bool,
-    fullscreen: bool,
+    /// Fullscreen toolbar floating over the video, when shown.
+    toolbar_overlay: Option<Rect>,
     notice: Option<(String, Instant)>,
     capture_dir: PathBuf,
     disconnect_requested: bool,
@@ -307,7 +308,7 @@ impl ViewerApp {
             mouse_buttons: 0,
             relative_motion: Vec2::ZERO,
             cursor_grabbed: false,
-            fullscreen: false,
+            toolbar_overlay: None,
             notice: None,
             capture_dir,
             disconnect_requested: false,
@@ -411,9 +412,10 @@ impl ViewerApp {
         }
     }
 
-    fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
-        self.fullscreen = !self.fullscreen;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+    /// Reads the real window state, which the window manager can change too.
+    fn toggle_fullscreen(&self, ctx: &egui::Context) {
+        let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
     }
 
     fn notify(&mut self, text: impl Into<String>) {
@@ -537,8 +539,13 @@ impl ViewerApp {
             return;
         };
         let events = ctx.input(|input| input.events.clone());
+        // Clicks on the fullscreen toolbar are not for the host.
+        let over_toolbar = |pos: Pos2| self.toolbar_overlay.is_some_and(|rect| rect.contains(pos));
         for event in events {
             match event {
+                Event::PointerMoved(pos) if over_toolbar(pos) => {}
+                Event::PointerButton { pos, .. }
+                    if over_toolbar(pos) && self.mouse_buttons == 0 => {}
                 Event::PointerMoved(pos)
                     if focused && (image_rect.contains(pos) || self.mouse_buttons != 0) =>
                 {
@@ -902,6 +909,128 @@ impl ViewerApp {
             Err(error) => format!("Screenshot failed: {error:#}"),
         });
     }
+
+    fn toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        status: &ViewerStatus,
+        fullscreen: bool,
+    ) {
+        // Wrap whole widgets onto extra rows instead of truncating them
+        // when the window is too narrow.
+        ui.horizontal_wrapped(|ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            let color = match status.state {
+                ConnectionState::Connected => Color32::from_rgb(80, 200, 120),
+                ConnectionState::Error | ConnectionState::Rejected { .. } => {
+                    Color32::from_rgb(235, 90, 90)
+                }
+                _ => Color32::from_rgb(235, 185, 70),
+            };
+            ui.colored_label(color, format!("● {}", status.message));
+            if status.state == ConnectionState::Reconnecting
+                && ui
+                    .small_button("Reconnect now")
+                    .on_hover_text("Skip the wait before the next attempt")
+                    .clicked()
+            {
+                self.handle
+                    .shared
+                    .reconnect_now
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if let Some(frame) = &self.displayed_frame {
+                ui.separator();
+                ui.label(format!("{}×{}", frame.width, frame.height));
+            }
+            ui.separator();
+            if !status.keyboard {
+                ui.weak("Keyboard/mouse off");
+            } else if let Some(id) = self.captured_by {
+                let text = if status.absolute_mouse {
+                    "⌨ Keyboard captured"
+                } else {
+                    // The locked cursor cannot reach the Release button.
+                    "⌨ Keyboard and mouse captured (Right Ctrl releases)"
+                };
+                ui.colored_label(Color32::from_rgb(90, 160, 255), text)
+                    .on_hover_text(HOST_KEY_HELP);
+                if ui
+                    .small_button("Release")
+                    .on_hover_text("Stop sending keys to the host (Right Ctrl)")
+                    .clicked()
+                {
+                    ui.memory_mut(|memory| memory.surrender_focus(id));
+                }
+            } else {
+                ui.colored_label(
+                    Color32::from_rgb(235, 185, 70),
+                    "Click the screen or press Right Ctrl to capture the keyboard",
+                )
+                .on_hover_text(HOST_KEY_HELP);
+            }
+            ui.separator();
+            ui.add_enabled_ui(status.keyboard, |ui| self.send_keys_menu(ui));
+            ui.add_enabled_ui(status.keyboard, |ui| self.keyboard_menu(ui, status.leds));
+            self.typing_progress(ui);
+            if let Some(leds) = status.leds {
+                for (label, bit) in LOCK_KEYS.map(|(label, bit, _)| (label, bit)) {
+                    let on = leds & bit != 0;
+                    ui.label(egui::RichText::new(label).small().monospace().color(if on {
+                        Color32::from_rgb(80, 200, 120)
+                    } else {
+                        Color32::from_gray(90)
+                    }))
+                    .on_hover_text(format!(
+                        "Host {label} lock is {}",
+                        if on { "on" } else { "off" }
+                    ));
+                }
+            }
+            ui.separator();
+            for kind in [MediaKind::Cdrom, MediaKind::Floppy] {
+                self.media_menu(ui, kind, status.media(kind));
+            }
+            ui.separator();
+            if ui.button("Screenshot").clicked() {
+                self.save_screenshot();
+            }
+            if ui
+                .button(if fullscreen {
+                    "Exit fullscreen"
+                } else {
+                    "Fullscreen"
+                })
+                .clicked()
+            {
+                self.toggle_fullscreen(ctx);
+            }
+            if ui.button("Disconnect").clicked() {
+                self.request_exit(ctx, status, Exit::Disconnect);
+            }
+        });
+        if let Some((notice, shown)) = &self.notice {
+            match NOTICE_TIMEOUT.checked_sub(shown.elapsed()) {
+                Some(remaining) => {
+                    ui.small(notice);
+                    ctx.request_repaint_after(remaining);
+                }
+                None => self.notice = None,
+            }
+        }
+    }
+
+    /// In fullscreen the toolbar hides until the pointer touches the top edge,
+    /// and stays while the pointer or one of its menus is on it.
+    fn reveal_toolbar(&self, ctx: &egui::Context) -> bool {
+        let pointer = ctx.input(|input| input.pointer.hover_pos());
+        let near_top = pointer.is_some_and(|pos| pos.y <= ctx.content_rect().top() + 2.0);
+        let on_toolbar = pointer
+            .zip(self.toolbar_overlay)
+            .is_some_and(|(pos, rect)| rect.expand(24.0).contains(pos));
+        near_top || on_toolbar || egui::Popup::is_any_open(ctx)
+    }
 }
 
 impl eframe::App for ViewerApp {
@@ -921,110 +1050,24 @@ impl eframe::App for ViewerApp {
         }
         self.confirm_exit_dialog(&ctx, &status);
 
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            // Wrap whole widgets onto extra rows instead of truncating them
-            // when the window is too narrow.
-            ui.horizontal_wrapped(|ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                let color = match status.state {
-                    ConnectionState::Connected => Color32::from_rgb(80, 200, 120),
-                    ConnectionState::Error | ConnectionState::Rejected { .. } => {
-                        Color32::from_rgb(235, 90, 90)
-                    }
-                    _ => Color32::from_rgb(235, 185, 70),
-                };
-                ui.colored_label(color, format!("● {}", status.message));
-                if status.state == ConnectionState::Reconnecting
-                    && ui
-                        .small_button("Reconnect now")
-                        .on_hover_text("Skip the wait before the next attempt")
-                        .clicked()
-                {
-                    self.handle
-                        .shared
-                        .reconnect_now
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                if let Some(frame) = &self.displayed_frame {
-                    ui.separator();
-                    ui.label(format!("{}×{}", frame.width, frame.height));
-                }
-                ui.separator();
-                if !status.keyboard {
-                    ui.weak("Keyboard/mouse off");
-                } else if let Some(id) = self.captured_by {
-                    let text = if status.absolute_mouse {
-                        "⌨ Keyboard captured"
-                    } else {
-                        // The locked cursor cannot reach the Release button.
-                        "⌨ Keyboard and mouse captured (Right Ctrl releases)"
-                    };
-                    ui.colored_label(Color32::from_rgb(90, 160, 255), text)
-                        .on_hover_text(HOST_KEY_HELP);
-                    if ui
-                        .small_button("Release")
-                        .on_hover_text("Stop sending keys to the host (Right Ctrl)")
-                        .clicked()
-                    {
-                        ui.memory_mut(|memory| memory.surrender_focus(id));
-                    }
-                } else {
-                    ui.colored_label(
-                        Color32::from_rgb(235, 185, 70),
-                        "Click the screen or press Right Ctrl to capture the keyboard",
-                    )
-                    .on_hover_text(HOST_KEY_HELP);
-                }
-                ui.separator();
-                ui.add_enabled_ui(status.keyboard, |ui| self.send_keys_menu(ui));
-                ui.add_enabled_ui(status.keyboard, |ui| self.keyboard_menu(ui, status.leds));
-                self.typing_progress(ui);
-                if let Some(leds) = status.leds {
-                    for (label, bit) in LOCK_KEYS.map(|(label, bit, _)| (label, bit)) {
-                        let on = leds & bit != 0;
-                        ui.label(egui::RichText::new(label).small().monospace().color(if on {
-                            Color32::from_rgb(80, 200, 120)
-                        } else {
-                            Color32::from_gray(90)
-                        }))
-                        .on_hover_text(format!(
-                            "Host {label} lock is {}",
-                            if on { "on" } else { "off" }
-                        ));
-                    }
-                }
-                ui.separator();
-                for kind in [MediaKind::Cdrom, MediaKind::Floppy] {
-                    self.media_menu(ui, kind, status.media(kind));
-                }
-                ui.separator();
-                if ui.button("Screenshot").clicked() {
-                    self.save_screenshot();
-                }
-                if ui
-                    .button(if self.fullscreen {
-                        "Exit fullscreen"
-                    } else {
-                        "Fullscreen"
-                    })
-                    .clicked()
-                {
-                    self.toggle_fullscreen(&ctx);
-                }
-                if ui.button("Disconnect").clicked() {
-                    self.request_exit(&ctx, &status, Exit::Disconnect);
-                }
-            });
-            if let Some((notice, shown)) = &self.notice {
-                match NOTICE_TIMEOUT.checked_sub(shown.elapsed()) {
-                    Some(remaining) => {
-                        ui.small(notice);
-                        ctx.request_repaint_after(remaining);
-                    }
-                    None => self.notice = None,
-                }
-            }
-        });
+        let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+        if !fullscreen {
+            self.toolbar_overlay = None;
+            egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui, &ctx, &status, fullscreen));
+        } else if self.reveal_toolbar(&ctx) {
+            // Float over the video so it does not rescale when revealed.
+            let area = egui::Area::new(egui::Id::new("fullscreen-toolbar"))
+                .fixed_pos(ctx.content_rect().left_top())
+                .show(&ctx, |ui| {
+                    egui::Frame::side_top_panel(ui.style()).show(ui, |ui| {
+                        ui.set_width(ctx.content_rect().width());
+                        self.toolbar(ui, &ctx, &status, fullscreen);
+                    });
+                });
+            self.toolbar_overlay = Some(area.response.rect);
+        } else {
+            self.toolbar_overlay = None;
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::from_rgb(18, 18, 20)))

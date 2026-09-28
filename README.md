@@ -48,7 +48,8 @@ host keyboard layout applies.
 
 **Right Ctrl** is the client's host key and never reaches the host (use Left
 Ctrl there): tap it to capture or release the keyboard; hold it and press
-**F** for fullscreen, **V** to paste text or **Del** for Ctrl+Alt+Del.
+**F** for fullscreen, **V** to paste text or **Del** for Ctrl+Alt+Del. In
+fullscreen the toolbar hides; move the pointer to the top edge to show it.
 
 The **Send keys** menu sends combinations the local system would capture:
 Ctrl+Alt+Del, Ctrl+Alt+F1…F12, Alt+Tab, Super, Print Screen and Magic SysRq.
