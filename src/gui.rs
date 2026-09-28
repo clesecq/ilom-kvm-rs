@@ -508,6 +508,31 @@ impl ViewerApp {
         ));
     }
 
+    /// Progress of a paste being typed, with a button to abort it.
+    fn typing_progress(&self, ui: &mut egui::Ui) {
+        use std::sync::atomic::Ordering;
+        let shared = &self.handle.shared;
+        let total = shared.typing_total.load(Ordering::SeqCst);
+        // Single strokes come from the Send keys menu; no progress needed.
+        if total <= 1 {
+            return;
+        }
+        let done = shared.typing_done.load(Ordering::SeqCst);
+        ui.add(
+            egui::ProgressBar::new(done as f32 / total as f32)
+                .desired_width(120.0)
+                .text(format!("Typing {done}/{total}")),
+        );
+        if ui
+            .small_button("Stop")
+            .on_hover_text("Abort the paste")
+            .clicked()
+        {
+            shared.cancel_typing.store(true, Ordering::SeqCst);
+        }
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
+    }
+
     /// Paste, host layout and lock toggles, kept out of the toolbar row.
     fn keyboard_menu(&mut self, ui: &mut egui::Ui, leds: Option<u8>) {
         ui.menu_button("Keyboard", |ui| {
@@ -517,16 +542,6 @@ impl ViewerApp {
                 .clicked()
             {
                 self.paste_clipboard();
-            }
-            if ui
-                .button("Stop typing")
-                .on_hover_text("Abort a paste that is still being typed")
-                .clicked()
-            {
-                self.handle
-                    .shared
-                    .cancel_typing
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
             ui.menu_button(format!("Host layout: {}", self.layout.label()), |ui| {
                 for layout in Layout::ALL {
@@ -719,6 +734,7 @@ impl eframe::App for ViewerApp {
                 ui.separator();
                 ui.add_enabled_ui(status.keyboard, |ui| self.send_keys_menu(ui));
                 ui.add_enabled_ui(status.keyboard, |ui| self.keyboard_menu(ui, status.leds));
+                self.typing_progress(ui);
                 if let Some(leds) = status.leds {
                     for (label, bit) in LOCK_KEYS.map(|(label, bit, _)| (label, bit)) {
                         let on = leds & bit != 0;

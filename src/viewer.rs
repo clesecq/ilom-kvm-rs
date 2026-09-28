@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -152,6 +152,9 @@ pub struct ViewerShared {
     pub mouse_packets_sent: AtomicU64,
     /// Set to abort a paste that is still being typed.
     pub cancel_typing: AtomicBool,
+    /// Keystrokes of the paste being typed (0 when idle) and those sent so far.
+    pub typing_total: AtomicUsize,
+    pub typing_done: AtomicUsize,
     /// Set to skip the wait before the next reconnect attempt.
     pub reconnect_now: AtomicBool,
 }
@@ -475,6 +478,18 @@ fn type_strokes(
     shared: &ViewerShared,
 ) -> Result<u64> {
     shared.cancel_typing.store(false, Ordering::SeqCst);
+    shared.typing_done.store(0, Ordering::SeqCst);
+    shared.typing_total.store(strokes.len(), Ordering::SeqCst);
+    let result = type_each(session, strokes, shared);
+    shared.typing_total.store(0, Ordering::SeqCst);
+    result
+}
+
+fn type_each(
+    session: &mut HidSession,
+    strokes: &[keymap::Stroke],
+    shared: &ViewerShared,
+) -> Result<u64> {
     for &(modifiers, usage) in strokes {
         if shared.cancel_typing.load(Ordering::SeqCst) {
             session.send_keyboard(0, &[])?;
@@ -490,6 +505,7 @@ fn type_strokes(
         session.send_keyboard(0, &[])?;
         thread::sleep(TYPE_DELAY);
         shared.keyboard_packets_sent.fetch_add(1, Ordering::Relaxed);
+        shared.typing_done.fetch_add(1, Ordering::SeqCst);
     }
     Ok(strokes.len() as u64)
 }
