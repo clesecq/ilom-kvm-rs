@@ -6,7 +6,7 @@
 
 use des::{
     Des,
-    cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray},
+    cipher::{BlockCipherEncrypt, KeyInit},
 };
 
 pub fn challenge() -> std::io::Result<[u8; 16]> {
@@ -21,10 +21,10 @@ pub fn response(password: &[u8], challenge: &[u8; 16]) -> [u8; 16] {
     for (slot, byte) in key.iter_mut().zip(password) {
         *slot = byte.reverse_bits();
     }
-    let cipher = Des::new(GenericArray::from_slice(&key));
+    let cipher = Des::new(&key.into());
     let mut out = *challenge;
-    for block in out.chunks_exact_mut(8) {
-        cipher.encrypt_block(GenericArray::from_mut_slice(block));
+    for block in out.as_chunks_mut::<8>().0 {
+        cipher.encrypt_block(block.into());
     }
     out
 }
