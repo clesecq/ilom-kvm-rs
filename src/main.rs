@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilom_kvm::{
     codec::AspeedCodec,
+    config,
     gui::{HostKey, IlomApp, Startup},
     hid::HidSession,
     jnlp::{self, ConsoleArgs},
@@ -61,11 +62,12 @@ struct ViewerArgs {
     /// Connect straight away using ILOM_HOST/ILOM_USER/ILOM_PASSWORD.
     #[arg(long)]
     auto: bool,
-    #[arg(long, default_value = "captures")]
-    capture_dir: PathBuf,
+    /// Screenshot folder [default: ilom-kvm in the Pictures folder].
+    #[arg(long)]
+    capture_dir: Option<PathBuf>,
     /// Client key never sent to the host: tap to capture or release the
     /// keyboard, hold for shortcuts (F fullscreen, V paste, Del Ctrl+Alt+Del)
-    /// [default: last one chosen, else right-ctrl].
+    /// [default: last one chosen, else right-ctrl (right-super on macOS)].
     #[arg(long, env = "ILOM_HOST_KEY", value_enum)]
     host_key: Option<HostKey>,
 }
@@ -151,7 +153,6 @@ fn main() -> Result<()> {
         None => viewer(ViewerArgs {
             user: std::env::var("ILOM_USER").ok(),
             host: std::env::var("ILOM_HOST").ok(),
-            capture_dir: "captures".into(),
             host_key: std::env::var("ILOM_HOST_KEY")
                 .ok()
                 .and_then(|value| clap::ValueEnum::from_str(&value, true).ok()),
@@ -205,7 +206,7 @@ fn viewer(args: ViewerArgs) -> Result<()> {
         host,
         username,
         password,
-        capture_dir: args.capture_dir,
+        capture_dir: args.capture_dir.unwrap_or_else(config::screenshot_dir),
         host_key,
         layout,
         settings,

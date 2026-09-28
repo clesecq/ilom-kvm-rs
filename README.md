@@ -46,12 +46,15 @@ Click the framebuffer to capture the keyboard; the toolbar shows the capture
 state and a **Release** button. Keys are sent by physical position, so the
 host keyboard layout applies.
 
-**Right Ctrl** is the client's host key by default and never reaches the host
-(use Left Ctrl there). Pick another one (`right-super`, `menu`, `scroll-lock`
-or `none`) with `--host-key` or `ILOM_HOST_KEY`, or in the Keyboard menu for
-the current run. Tap it to capture or release the keyboard; hold it and press
+**Right Ctrl** (**Right Cmd** on macOS, whose laptops lack Right Ctrl) is the
+client's host key by default and never reaches the host. Pick another one
+(`right-ctrl`, `right-super`, `menu`, `scroll-lock` or `none`) with
+`--host-key` or `ILOM_HOST_KEY`, or in the Keyboard menu (remembered). Tap it to capture or release the keyboard; hold it and press
 **F** for fullscreen, **V** to paste text or **Del** for Ctrl+Alt+Del. In
 fullscreen the toolbar hides; move the pointer to the top edge to show it.
+**Screenshot** saves PNG files to `ilom-kvm` in the Pictures folder
+(`--capture-dir` to change).
+
 The **100%** toggle shows host pixels 1:1 (scroll with the wheel or the
 scroll bars when the screen is larger than the window); otherwise the screen
 fits the window. Whole-number scales stay sharp.

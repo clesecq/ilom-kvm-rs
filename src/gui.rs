@@ -283,15 +283,25 @@ impl eframe::App for IlomApp {
 }
 
 /// Client key never sent to the host; see [`ViewerApp::handle_keyboard`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum HostKey {
-    #[default]
     RightCtrl,
     RightSuper,
     Menu,
     ScrollLock,
     /// No host key: every key goes to the host.
     None,
+}
+
+impl Default for HostKey {
+    /// Mac laptop keyboards have no Right Ctrl; Right Cmd is their spare key.
+    fn default() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::RightSuper
+        } else {
+            Self::RightCtrl
+        }
+    }
 }
 
 impl HostKey {
@@ -317,6 +327,7 @@ impl HostKey {
     fn label(self) -> &'static str {
         match self {
             Self::RightCtrl => "Right Ctrl",
+            Self::RightSuper if cfg!(target_os = "macos") => "Right Cmd",
             Self::RightSuper => "Right Super",
             Self::Menu => "Menu",
             Self::ScrollLock => "Scroll Lock",
@@ -1710,7 +1721,12 @@ mod tests {
             Some(HostAction::CtrlAltDel)
         );
         assert_eq!(HostAction::for_key(Key::A), None);
-        assert_eq!(HostKey::default().key(), Some(Key::ControlRight));
+        let default = if cfg!(target_os = "macos") {
+            Key::SuperRight
+        } else {
+            Key::ControlRight
+        };
+        assert_eq!(HostKey::default().key(), Some(default));
         assert_eq!(HostKey::None.key(), None);
     }
 
