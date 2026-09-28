@@ -152,6 +152,8 @@ pub struct ViewerShared {
     pub mouse_packets_sent: AtomicU64,
     /// Set to abort a paste that is still being typed.
     pub cancel_typing: AtomicBool,
+    /// Set to skip the wait before the next reconnect attempt.
+    pub reconnect_now: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -271,11 +273,19 @@ fn run(
     let mut attempt = 0_u32;
     while !stop.load(Ordering::SeqCst) {
         let result = session(&source, &shared, &stop, &sockets, &hid, &media, &repaint);
+        let was_connected = shared
+            .status
+            .lock()
+            .is_ok_and(|status| status.state == ConnectionState::Connected);
         media.link_down();
         if let Some(session) = hid.lock().ok().and_then(|mut hid| hid.take()) {
             session.close();
         }
         sockets.lock().map(|mut s| s.clear()).ok();
+        set_status(&shared, &repaint, |status| {
+            status.keyboard = false;
+            status.leds = None;
+        });
         if stop.load(Ordering::SeqCst) {
             break;
         }
@@ -291,14 +301,29 @@ fn run(
             });
             break;
         }
-        attempt += 1;
+        // Back off only while attempts keep failing, not after a session
+        // that ran and then dropped.
+        attempt = if was_connected { 1 } else { attempt + 1 };
         let delay = Duration::from_secs(u64::from(attempt.min(6)) * 5);
-        set_status(&shared, &repaint, |status| {
-            status.state = ConnectionState::Reconnecting;
-            status.message = format!("{message}; reconnecting in {}s", delay.as_secs());
-        });
         let deadline = std::time::Instant::now() + delay;
-        while std::time::Instant::now() < deadline && !stop.load(Ordering::SeqCst) {
+        shared.reconnect_now.store(false, Ordering::SeqCst);
+        let mut shown = None;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero()
+                || stop.load(Ordering::SeqCst)
+                || shared.reconnect_now.swap(false, Ordering::SeqCst)
+            {
+                break;
+            }
+            let seconds = left.as_secs() + 1;
+            if shown != Some(seconds) {
+                shown = Some(seconds);
+                set_status(&shared, &repaint, |status| {
+                    status.state = ConnectionState::Reconnecting;
+                    status.message = format!("{message}; reconnecting in {seconds}s");
+                });
+            }
             thread::sleep(Duration::from_millis(200));
         }
     }
