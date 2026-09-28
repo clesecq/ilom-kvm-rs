@@ -29,9 +29,25 @@ pub fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
     let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
         .with_context(|| format!("connect to {address}"))?;
     stream.set_nodelay(true)?;
+    enable_keepalive(&stream)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     Ok(stream)
+}
+
+/// Lets a read on an idle console notice a dead SP or network: after the
+/// handshake reads have no timeout. Detection takes about 30 s (65 s on
+/// Windows, which cannot set the probe count). The vendor client also enables
+/// TCP keep-alive.
+fn enable_keepalive(stream: &TcpStream) -> Result<()> {
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(15))
+        .with_interval(Duration::from_secs(5));
+    #[cfg(not(windows))]
+    let keepalive = keepalive.with_retries(3);
+    socket2::SockRef::from(stream)
+        .set_tcp_keepalive(&keepalive)
+        .context("enable TCP keep-alive")
 }
 
 pub fn connect(host: &str, port: u16, policy: CertPolicy) -> Result<TlsStream<TcpStream>> {

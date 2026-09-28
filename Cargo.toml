@@ -25,6 +25,7 @@ thiserror = "2.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 wasmi = "2.0"
+socket2 = { version = "0.6", features = ["all"] }
 
 [patch.crates-io]
 egui-winit = { path = "third_party/egui-winit" }

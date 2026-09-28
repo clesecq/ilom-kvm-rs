@@ -410,7 +410,9 @@ G3 servers.
 Liveness: the vendor client enables TCP keep-alive and waits up to 120 s per
 read. On timeout it probes the SP by opening (and immediately closing) a new
 TCP connection to the same port. `ilom-kvm-rs` uses 30 s I/O timeouts during
-the handshake and no read timeout afterwards.
+the handshake and no read timeout afterwards. It enables TCP keep-alive
+(15 s idle, 5 s interval, 3 probes), so a dead SP or network ends the read
+within about 30 s and the viewer reconnects.
 
 ### 5.6 Video fragments
 
