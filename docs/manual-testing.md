@@ -179,3 +179,22 @@ Wrong password (only with care: repeated failures may lock the account):
       run.
 - [ ] **(Windows)** Web login works without `HOME` set (the certificate store
       is found under `%APPDATA%`).
+
+## VNC bridge
+
+- [ ] `ilom-vnc` with `.env` credentials: `remote-viewer vnc://127.0.0.1:5900`
+      shows the host screen after about 10 s.
+- [ ] RustConn: a VNC connection to `127.0.0.1:5900` shows the screen, and
+      typing and clicking reach the host.
+- [ ] With a French host (`--layout fr`) and a client that sends keysyms
+      (RustConn), `a`, `1`, `@` and `ê` come out right on the host.
+- [ ] A second client at the same time sees the same screen; the log shows
+      one ILOM session only.
+- [ ] After the last client leaves, the log shows the ILOM session closing
+      after `--idle-timeout` seconds; a new client starts a new one.
+- [ ] A host resolution change (e.g. the BIOS to the OS) resizes the client
+      window.
+- [ ] `--listen 0.0.0.0:5900` without `ILOM_VNC_PASSWORD` refuses to start;
+      with it, the client asks for the password and rejects a wrong one.
+- [ ] A wrong `ILOM_PASSWORD`: the client shows the login error, and later
+      clients get the same error without a new web login.
