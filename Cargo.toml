@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ilom-kvm-core", "crates/ilom-kvm"]
+members = ["crates/ilom-kvm-core", "crates/ilom-kvm", "crates/ilom-vnc"]
 default-members = ["crates/ilom-kvm"]
 
 [workspace.package]

@@ -1,0 +1,17 @@
+[package]
+name = "ilom-vnc"
+description = "Local VNC (RFB) server bridging to the Oracle ILOM Remote System Console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ilom-kvm-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+des = "0.8"
+dotenvy.workspace = true
+flate2 = "1"
+getrandom = "0.3"
+tracing.workspace = true
+tracing-subscriber.workspace = true
