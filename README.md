@@ -42,8 +42,14 @@ cargo run --release -- viewer --auto          # connect with .env credentials
 cargo run --release -- viewer --jnlp jnlpgenerator-16   # downloaded launch file
 ```
 
-Click the framebuffer to send keyboard input. Keys are sent by physical
-position, so the host keyboard layout applies.
+Click the framebuffer to capture the keyboard; the toolbar shows the capture
+state and a **Release** button. Keys are sent by physical position, so the
+host keyboard layout applies.
+
+The **Send keys** menu sends combinations the local system would capture:
+Ctrl+Alt+Del, Ctrl+Alt+F1…F12, Alt+Tab, Super, Print Screen and Magic SysRq.
+The **Keyboard** menu pastes clipboard text (typed with the chosen host
+layout) and toggles the host lock keys.
 
 The **CD-ROM…** and **Floppy/USB…** toolbar menus redirect an ISO image or a
 raw disk image to the host's virtual drives. Floppy images are read-only

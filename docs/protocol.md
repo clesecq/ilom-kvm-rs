@@ -1209,8 +1209,8 @@ When the SP selects relative mode, it logs a warning.
 `ilom-kvm-rs` treats body byte 1 of *any* IUSB packet as LEDs (no device
 type filter), reads one payload byte only for HIDCMD 111/112 with status 0,
 and refuses IUSB bodies larger than 4096 bytes. The GUI shows
-NUM/CAPS/SCROLL indicators; clicking one sends the lock usage 0x53 / 0x39 /
-0x47.
+NUM/CAPS/SCROLL indicators; the matching Keyboard menu entries send the lock
+usage 0x53 / 0x39 / 0x47.
 
 ### 8.8 Encryption
 
