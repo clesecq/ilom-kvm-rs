@@ -394,6 +394,7 @@ fn session(
 
     let mut codec = AspeedCodec::new()?;
     let mut sequence = 0_u64;
+    let mut blank = false;
     let result = loop {
         if stop.load(Ordering::SeqCst) {
             break Ok(());
@@ -405,6 +406,11 @@ fn session(
                 match codec.decode(&frame) {
                     Ok(rgba) => {
                         sequence += 1;
+                        if std::mem::take(&mut blank) {
+                            set_status(shared, repaint, |status| {
+                                status.message = format!("Connected to {}", console.host);
+                            });
+                        }
                         if let Ok(mut latest) = shared.latest_frame.lock() {
                             *latest = Some(Arc::new(DecodedFrame {
                                 width,
@@ -419,6 +425,7 @@ fn session(
                 }
             }
             Ok(VideoEvent::BlankScreen) => {
+                blank = true;
                 set_status(shared, repaint, |status| {
                     status.message = "Host video is blank (no signal)".into();
                 });
