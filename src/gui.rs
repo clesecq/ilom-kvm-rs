@@ -424,6 +424,10 @@ impl ViewerApp {
             self.exit(ctx, exit);
         } else {
             self.pending_exit = Some(exit);
+            // Keys typed in the dialog must not reach the host.
+            if let Some(id) = self.captured_by {
+                ctx.memory_mut(|memory| memory.surrender_focus(id));
+            }
         }
     }
 
