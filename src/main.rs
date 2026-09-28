@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilom_kvm::{
     codec::AspeedCodec,
-    gui::IlomApp,
+    gui::{HostKey, IlomApp},
     hid::HidSession,
     jnlp::{self, ConsoleArgs},
     known_certs::KnownCerts,
@@ -60,6 +60,10 @@ struct ViewerArgs {
     auto: bool,
     #[arg(long, default_value = "captures")]
     capture_dir: PathBuf,
+    /// Client key never sent to the host: tap to capture or release the
+    /// keyboard, hold for shortcuts (F fullscreen, V paste, Del Ctrl+Alt+Del).
+    #[arg(long, env = "ILOM_HOST_KEY", value_enum, default_value_t)]
+    host_key: HostKey,
 }
 
 #[derive(clap::Args)]
@@ -144,6 +148,10 @@ fn main() -> Result<()> {
             user: std::env::var("ILOM_USER").unwrap_or_else(|_| "root".into()),
             host: std::env::var("ILOM_HOST").ok(),
             capture_dir: "captures".into(),
+            host_key: std::env::var("ILOM_HOST_KEY")
+                .ok()
+                .and_then(|value| clap::ValueEnum::from_str(&value, true).ok())
+                .unwrap_or_default(),
             ..Default::default()
         }),
     }
@@ -176,6 +184,7 @@ fn viewer(args: ViewerArgs) -> Result<()> {
                 args.user,
                 password,
                 args.capture_dir,
+                args.host_key,
                 initial,
                 &cc.egui_ctx,
             )))

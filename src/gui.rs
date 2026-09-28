@@ -57,6 +57,7 @@ pub struct IlomApp {
     username: String,
     password: String,
     capture_dir: PathBuf,
+    host_key: HostKey,
     form_error: Option<String>,
 }
 
@@ -66,16 +67,19 @@ impl IlomApp {
         username: String,
         password: Option<String>,
         capture_dir: PathBuf,
+        host_key: HostKey,
         initial: Option<Source>,
         context: &egui::Context,
     ) -> Self {
-        let viewer = initial.map(|source| ViewerApp::new(context, source, capture_dir.clone()));
+        let viewer =
+            initial.map(|source| ViewerApp::new(context, source, capture_dir.clone(), host_key));
         Self {
             viewer,
             host: host.unwrap_or_default(),
             username,
             password: password.unwrap_or_default(),
             capture_dir,
+            host_key,
             form_error: None,
         }
     }
@@ -190,6 +194,7 @@ impl eframe::App for IlomApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if let Some(viewer) = self.viewer.as_mut() {
             eframe::App::ui(viewer, ui, frame);
+            self.host_key = viewer.host_key_choice;
             let rejected = viewer.rejection();
             let login = viewer.login.clone();
             if viewer.disconnect_requested || rejected.is_some() {
@@ -217,17 +222,73 @@ impl eframe::App for IlomApp {
             return;
         }
         if let Some(source) = self.show_login(ui) {
-            self.viewer = Some(ViewerApp::new(ui.ctx(), source, self.capture_dir.clone()));
+            self.viewer = Some(ViewerApp::new(
+                ui.ctx(),
+                source,
+                self.capture_dir.clone(),
+                self.host_key,
+            ));
         }
     }
 }
 
 /// Client key never sent to the host; see [`ViewerApp::handle_keyboard`].
-const HOST_KEY: Key = Key::ControlRight;
-const HOST_KEY_HELP: &str = "Right Ctrl: capture or release the keyboard\n\
-    Right Ctrl+F: fullscreen\n\
-    Right Ctrl+V: paste text\n\
-    Right Ctrl+Del: Ctrl+Alt+Del";
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum HostKey {
+    #[default]
+    RightCtrl,
+    RightSuper,
+    Menu,
+    ScrollLock,
+    /// No host key: every key goes to the host.
+    None,
+}
+
+impl HostKey {
+    const ALL: [Self; 5] = [
+        Self::RightCtrl,
+        Self::RightSuper,
+        Self::Menu,
+        Self::ScrollLock,
+        Self::None,
+    ];
+
+    fn key(self) -> Option<Key> {
+        Some(match self {
+            Self::RightCtrl => Key::ControlRight,
+            Self::RightSuper => Key::SuperRight,
+            // Menu and Scroll Lock arrive as F14/F17 from the patched egui-winit.
+            Self::Menu => Key::F14,
+            Self::ScrollLock => Key::F17,
+            Self::None => return None,
+        })
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::RightCtrl => "Right Ctrl",
+            Self::RightSuper => "Right Super",
+            Self::Menu => "Menu",
+            Self::ScrollLock => "Scroll Lock",
+            Self::None => "None",
+        }
+    }
+
+    fn help(self) -> String {
+        match self {
+            Self::None => "No host key: click the screen to capture the keyboard".into(),
+            _ => {
+                let key = self.label();
+                format!(
+                    "{key}: capture or release the keyboard\n\
+                     {key}+F: fullscreen\n\
+                     {key}+V: paste text\n\
+                     {key}+Del: Ctrl+Alt+Del"
+                )
+            }
+        }
+    }
+}
 
 /// Client shortcut run with the host key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,12 +342,18 @@ pub struct ViewerApp {
     captured_by: Option<egui::Id>,
     /// Host key held down; `true` once it was used in a shortcut.
     host_key: Option<bool>,
+    pub host_key_choice: HostKey,
     /// Let the host write to the next floppy image mounted.
     floppy_writable: bool,
 }
 
 impl ViewerApp {
-    pub fn new(context: &egui::Context, source: Source, capture_dir: PathBuf) -> Self {
+    pub fn new(
+        context: &egui::Context,
+        source: Source,
+        capture_dir: PathBuf,
+        host_key_choice: HostKey,
+    ) -> Self {
         context.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "{} — {APP_TITLE}",
             source_host(&source)
@@ -316,6 +383,7 @@ impl ViewerApp {
             quit_confirmed: false,
             captured_by: None,
             host_key: None,
+            host_key_choice,
             floppy_writable: false,
         }
     }
@@ -443,7 +511,7 @@ impl ViewerApp {
     }
 
     /// Forwards key events to the host while `focused`. The host key
-    /// (Right Ctrl) is never forwarded: tapped alone it toggles capture, and
+    /// (Right Ctrl by default) is never forwarded: tapped alone it toggles capture, and
     /// held with another key it runs a client shortcut.
     fn handle_keyboard(&mut self, ctx: &egui::Context, focused: bool) -> Option<HostAction> {
         let events = ctx.input(|input| input.events.clone());
@@ -473,7 +541,7 @@ impl ViewerApp {
             // USB usages name physical positions; the host applies its
             // own layout, so prefer the physical key when available.
             let key = physical_key.unwrap_or(key);
-            if key == HOST_KEY {
+            if Some(key) == self.host_key_choice.key() {
                 if pressed {
                     if !repeat {
                         self.host_key = Some(false);
@@ -789,6 +857,15 @@ impl ViewerApp {
             })
             .response
             .on_hover_text("Keyboard layout configured on the host (used for pasting)");
+            ui.menu_button(format!("Host key: {}", self.host_key_choice.label()), |ui| {
+                for choice in HostKey::ALL {
+                    ui.selectable_value(&mut self.host_key_choice, choice, choice.label());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Client key that is never sent to the host (default with --host-key or ILOM_HOST_KEY)",
+            );
             if let Some(leds) = leds {
                 ui.separator();
                 for (label, bit, usage) in LOCK_KEYS {
@@ -948,27 +1025,36 @@ impl ViewerApp {
             if !status.keyboard {
                 ui.weak("Keyboard/mouse off");
             } else if let Some(id) = self.captured_by {
-                let text = if status.absolute_mouse {
-                    "⌨ Keyboard captured"
-                } else {
+                let host_key = self.host_key_choice;
+                let text = if self.cursor_grabbed {
                     // The locked cursor cannot reach the Release button.
-                    "⌨ Keyboard and mouse captured (Right Ctrl releases)"
+                    format!(
+                        "⌨ Keyboard and mouse captured ({} releases)",
+                        host_key.label()
+                    )
+                } else {
+                    "⌨ Keyboard captured".into()
                 };
                 ui.colored_label(Color32::from_rgb(90, 160, 255), text)
-                    .on_hover_text(HOST_KEY_HELP);
+                    .on_hover_text(host_key.help());
                 if ui
                     .small_button("Release")
-                    .on_hover_text("Stop sending keys to the host (Right Ctrl)")
+                    .on_hover_text("Stop sending keys to the host")
                     .clicked()
                 {
                     ui.memory_mut(|memory| memory.surrender_focus(id));
                 }
             } else {
-                ui.colored_label(
-                    Color32::from_rgb(235, 185, 70),
-                    "Click the screen or press Right Ctrl to capture the keyboard",
-                )
-                .on_hover_text(HOST_KEY_HELP);
+                let host_key = self.host_key_choice;
+                let text = match host_key {
+                    HostKey::None => "Click the screen to capture the keyboard".into(),
+                    _ => format!(
+                        "Click the screen or press {} to capture the keyboard",
+                        host_key.label()
+                    ),
+                };
+                ui.colored_label(Color32::from_rgb(235, 185, 70), text)
+                    .on_hover_text(host_key.help());
             }
             ui.separator();
             ui.add_enabled_ui(status.keyboard, |ui| self.send_keys_menu(ui));
@@ -1142,7 +1228,10 @@ impl eframe::App for ViewerApp {
                     None => {}
                 }
                 let absolute = status.absolute_mouse;
-                self.set_cursor_grab(&ctx, focused && status.keyboard && !absolute);
+                // Without a host key a locked cursor could never be released.
+                let grab =
+                    focused && status.keyboard && !absolute && self.host_key_choice.key().is_some();
+                self.set_cursor_grab(&ctx, grab);
                 self.handle_mouse(&ctx, rect, focused, absolute);
             });
     }
@@ -1353,7 +1442,8 @@ mod tests {
             Some(HostAction::CtrlAltDel)
         );
         assert_eq!(HostAction::for_key(Key::A), None);
-        assert_eq!(modifier_bit(HOST_KEY), Some(0x10));
+        assert_eq!(HostKey::default().key(), Some(Key::ControlRight));
+        assert_eq!(HostKey::None.key(), None);
     }
 
     #[test]
