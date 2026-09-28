@@ -30,6 +30,12 @@ const USAGE_F1: u8 = 0x3a;
 const USAGE_F4: u8 = 0x3d;
 const USAGE_PRINT_SCREEN: u8 = 0x46;
 const USAGE_DELETE: u8 = 0x4c;
+/// Host lock keys: toolbar label, LED bit and USB usage.
+const LOCK_KEYS: [(&str, u8, u8); 3] = [
+    ("NUM", hid::LED_NUM_LOCK, hid::USAGE_NUM_LOCK),
+    ("CAPS", hid::LED_CAPS_LOCK, hid::USAGE_CAPS_LOCK),
+    ("SCROLL", hid::LED_SCROLL_LOCK, hid::USAGE_SCROLL_LOCK),
+];
 /// Magic SysRq commands offered in the "Send keys" menu.
 const SYSRQ_KEYS: [(char, &str); 8] = [
     ('h', "Help"),
@@ -499,6 +505,53 @@ impl ViewerApp {
         ));
     }
 
+    /// Paste, host layout and lock toggles, kept out of the toolbar row.
+    fn keyboard_menu(&mut self, ui: &mut egui::Ui, leds: Option<u8>) {
+        ui.menu_button("Keyboard", |ui| {
+            if ui
+                .button("Paste text")
+                .on_hover_text("Type the clipboard text on the host")
+                .clicked()
+            {
+                self.paste_clipboard();
+            }
+            if ui
+                .button("Stop typing")
+                .on_hover_text("Abort a paste that is still being typed")
+                .clicked()
+            {
+                self.handle
+                    .shared
+                    .cancel_typing
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            ui.menu_button(format!("Host layout: {}", self.layout.label()), |ui| {
+                for layout in Layout::ALL {
+                    ui.selectable_value(&mut self.layout, layout, layout.label());
+                }
+            })
+            .response
+            .on_hover_text("Keyboard layout configured on the host (used for pasting)");
+            if let Some(leds) = leds {
+                ui.separator();
+                for (label, bit, usage) in LOCK_KEYS {
+                    let on = leds & bit != 0;
+                    let text = format!("{label} lock ({})", if on { "on" } else { "off" });
+                    if ui.button(text).on_hover_text("Click to toggle").clicked() {
+                        self.send(ViewerCommand::Keystroke {
+                            modifiers: 0,
+                            usage,
+                        });
+                        self.send(ViewerCommand::Keyboard {
+                            modifiers: 0,
+                            usages: Vec::new(),
+                        });
+                    }
+                }
+            }
+        });
+    }
+
     /// Key combinations the local system would otherwise capture.
     fn send_keys_menu(&mut self, ui: &mut egui::Ui) {
         let combo = |modifiers, usage| ViewerCommand::TypeStrokes(vec![(modifiers, usage)]);
@@ -639,64 +692,21 @@ impl eframe::App for ViewerApp {
                 });
                 ui.separator();
                 ui.add_enabled_ui(status.keyboard, |ui| self.send_keys_menu(ui));
+                ui.add_enabled_ui(status.keyboard, |ui| self.keyboard_menu(ui, status.leds));
                 if let Some(leds) = status.leds {
-                    for (label, bit, usage) in [
-                        ("NUM", hid::LED_NUM_LOCK, hid::USAGE_NUM_LOCK),
-                        ("CAPS", hid::LED_CAPS_LOCK, hid::USAGE_CAPS_LOCK),
-                        ("SCROLL", hid::LED_SCROLL_LOCK, hid::USAGE_SCROLL_LOCK),
-                    ] {
+                    for (label, bit) in LOCK_KEYS.map(|(label, bit, _)| (label, bit)) {
                         let on = leds & bit != 0;
-                        let text = egui::RichText::new(label).monospace().color(if on {
+                        ui.label(egui::RichText::new(label).small().monospace().color(if on {
                             Color32::from_rgb(80, 200, 120)
                         } else {
-                            Color32::from_gray(110)
-                        });
-                        let clicked = ui
-                            .add(egui::Button::new(text).selected(on))
-                            .on_hover_text(format!(
-                                "Host {label} lock is {}; click to toggle",
-                                if on { "on" } else { "off" }
-                            ))
-                            .clicked();
-                        if clicked {
-                            self.send(ViewerCommand::Keystroke {
-                                modifiers: 0,
-                                usage,
-                            });
-                            self.send(ViewerCommand::Keyboard {
-                                modifiers: 0,
-                                usages: Vec::new(),
-                            });
-                        }
+                            Color32::from_gray(90)
+                        }))
+                        .on_hover_text(format!(
+                            "Host {label} lock is {}",
+                            if on { "on" } else { "off" }
+                        ));
                     }
-                    ui.separator();
                 }
-                if ui
-                    .small_button("Stop typing")
-                    .on_hover_text("Abort a paste that is still being typed")
-                    .clicked()
-                {
-                    self.handle
-                        .shared
-                        .cancel_typing
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                if ui
-                    .add_enabled(status.keyboard, egui::Button::new("Paste text"))
-                    .on_hover_text("Type the clipboard text on the host")
-                    .clicked()
-                {
-                    self.paste_clipboard();
-                }
-                egui::ComboBox::from_id_salt("host-layout")
-                    .selected_text(self.layout.label())
-                    .show_ui(ui, |ui| {
-                        for layout in Layout::ALL {
-                            ui.selectable_value(&mut self.layout, layout, layout.label());
-                        }
-                    })
-                    .response
-                    .on_hover_text("Keyboard layout configured on the host (used for pasting)");
                 ui.separator();
                 for kind in [MediaKind::Cdrom, MediaKind::Floppy] {
                     self.media_menu(ui, kind, status.media(kind));
