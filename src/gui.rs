@@ -408,6 +408,8 @@ pub struct ViewerApp {
     toolbar_overlay: Option<Rect>,
     notice: Option<(String, Instant)>,
     capture_dir: PathBuf,
+    /// Kept open so a copied screenshot stays available (see `copy_screenshot`).
+    clipboard: Option<arboard::Clipboard>,
     disconnect_requested: bool,
     /// Exit waiting for confirmation because images are still mounted.
     pending_exit: Option<Exit>,
@@ -453,6 +455,7 @@ impl ViewerApp {
             toolbar_overlay: None,
             notice: None,
             capture_dir,
+            clipboard: None,
             disconnect_requested: false,
             pending_exit: None,
             quit_confirmed: false,
@@ -1100,6 +1103,71 @@ impl ViewerApp {
         });
     }
 
+    fn screenshot_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Screenshot", |ui| {
+            if ui.button("Save as PNG").clicked() {
+                self.save_screenshot();
+            }
+            if ui.button("Copy to clipboard").clicked() {
+                self.copy_screenshot();
+            }
+            if ui
+                .button("Open folder")
+                .on_hover_text(self.capture_dir.display().to_string())
+                .clicked()
+            {
+                self.open_capture_dir();
+            }
+        });
+    }
+
+    fn copy_screenshot(&mut self) {
+        let Some(frame) = self.displayed_frame.clone() else {
+            self.notify("No frame is available yet");
+            return;
+        };
+        let image = arboard::ImageData {
+            width: frame.width as usize,
+            height: frame.height as usize,
+            bytes: std::borrow::Cow::Borrowed(&frame.rgba),
+        };
+        // On Linux the clipboard is served by this process: keep the
+        // `Clipboard` alive, or the copied image vanishes with it.
+        let clipboard = match self.clipboard.take() {
+            Some(clipboard) => Ok(clipboard),
+            None => arboard::Clipboard::new(),
+        };
+        let result = clipboard.and_then(|mut clipboard| {
+            let copied = clipboard.set_image(image);
+            self.clipboard = Some(clipboard);
+            copied
+        });
+        self.notify(match result {
+            Ok(()) => format!("Screenshot copied ({}×{})", frame.width, frame.height),
+            Err(error) => format!("Could not copy the screenshot: {error}"),
+        });
+    }
+
+    fn open_capture_dir(&mut self) {
+        let dir = self.capture_dir.clone();
+        let result = std::fs::create_dir_all(&dir).and_then(|()| {
+            let opener = if cfg!(target_os = "windows") {
+                "explorer"
+            } else if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            std::process::Command::new(opener)
+                .arg(&dir)
+                .spawn()
+                .map(drop)
+        });
+        if let Err(error) = result {
+            self.notify(format!("Could not open {}: {error}", dir.display()));
+        }
+    }
+
     fn save_screenshot(&mut self) {
         let Some(frame) = self.displayed_frame.as_ref() else {
             self.notify("No frame is available yet");
@@ -1109,9 +1177,13 @@ impl ViewerApp {
             std::fs::create_dir_all(&self.capture_dir)?;
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_secs())
                 .unwrap_or_default();
-            let path = self.capture_dir.join(format!("ilom-{stamp}.png"));
+            // Milliseconds keep two shots in the same second apart.
+            let path = self.capture_dir.join(format!(
+                "ilom-{}-{:03}.png",
+                stamp.as_secs(),
+                stamp.subsec_millis()
+            ));
             image::save_buffer(
                 &path,
                 &frame.rgba,
@@ -1224,9 +1296,7 @@ impl ViewerApp {
                     "Show host pixels 1:1 and scroll when larger than the window; \
                  off fits the screen to the window",
                 );
-            if ui.button("Screenshot").clicked() {
-                self.save_screenshot();
-            }
+            self.screenshot_menu(ui);
             if ui
                 .button(if fullscreen {
                     "Exit fullscreen"
