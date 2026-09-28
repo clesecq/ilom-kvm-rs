@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "ilom-kvm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "ilom-kvm-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "ilom-vnc"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
