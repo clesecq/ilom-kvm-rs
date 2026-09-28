@@ -477,8 +477,18 @@ Pixel format: bits 8–11 R, 4–7 G, 0–3 B (4 bits each). If
 `cursor_type == 1`, bits 12–15 are alpha (0–15). Otherwise bit 15 = AND and
 bit 14 = XOR: AND 0 paints the colour; AND 1 with XOR 1 inverts the screen
 pixel. The vendor client draws the cursor into the framebuffer.
-`ilom-kvm-rs` does not parse type 48 yet (passed through as an "other"
-event).
+The vendor client draws the pattern from column `x_offset` and row
+`y_offset` onwards, with that first pixel at framebuffer position (`x`,
+`y`), clipped at the right and bottom edges; it resets `y` above 1200 to 0.
+A position-only update (checksum 0) keeps the previous type, offsets and
+pattern.
+
+`ilom-kvm-rs` parses type 48 with the same rules (header fields read as
+little-endian like the rest of IVTP) and the GUI draws the cursor over the
+framebuffer; XOR pixels invert the framebuffer pixel below. While the
+console is captured and the host cursor is known, the local pointer is hidden
+over the screen; otherwise it is a crosshair. *(uncertain: never seen live;
+the test host runs a text console, which has no hardware cursor.)*
 
 ### 5.8 Video engine configuration
 

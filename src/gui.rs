@@ -15,9 +15,10 @@ use crate::{
     keymap::{self, Layout},
     scsi::MediaKind,
     settings::Settings,
+    video,
     viewer::{
-        ConnectionState, DecodedFrame, MediaStatus, Source, ViewerCommand, ViewerHandle,
-        ViewerStatus, spawn_viewer,
+        ConnectionState, DecodedFrame, HostCursor, MediaStatus, Source, ViewerCommand,
+        ViewerHandle, ViewerStatus, spawn_viewer,
     },
 };
 
@@ -373,6 +374,9 @@ pub struct ViewerApp {
     pub layout: Layout,
     texture: Option<TextureHandle>,
     texture_options: TextureOptions,
+    /// Host cursor image, keyed by cursor serial, frame and filter, with its
+    /// place in host pixels.
+    cursor_texture: Option<((u64, u64, TextureOptions), TextureHandle, Rect)>,
     /// Show host pixels 1:1 instead of fitting the window.
     actual_size: bool,
     displayed_frame: Option<Arc<DecodedFrame>>,
@@ -423,6 +427,7 @@ impl ViewerApp {
             layout,
             texture: None,
             texture_options: TextureOptions::LINEAR,
+            cursor_texture: None,
             actual_size: false,
             displayed_frame: None,
             pressed_usages: BTreeSet::new(),
@@ -1194,6 +1199,7 @@ impl ViewerApp {
             rect,
             egui::Image::new((texture_id, rect.size())).sense(Sense::click_and_drag()),
         );
+        let host_cursor = self.draw_host_cursor(ui, ctx, rect, visible);
         if status.state != ConnectionState::Connected {
             // Dim the last frame so a stale screen is not mistaken for a live one.
             ui.painter()
@@ -1248,7 +1254,69 @@ impl ViewerApp {
         // Without a host key a locked cursor could never be released.
         let grab = focused && status.keyboard && !absolute && self.host_key_choice.key().is_some();
         self.set_cursor_grab(ctx, grab);
+        if focused
+            && absolute
+            && ctx
+                .pointer_hover_pos()
+                .is_some_and(|pos| visible.contains(pos))
+        {
+            // The host cursor is in the picture; a second local arrow lagging
+            // next to it only confuses.
+            ctx.set_cursor_icon(if host_cursor {
+                egui::CursorIcon::None
+            } else {
+                egui::CursorIcon::Crosshair
+            });
+        }
         self.handle_mouse(ctx, rect, visible, focused, absolute);
+    }
+
+    /// Paints the host hardware cursor over the framebuffer drawn in `rect`.
+    /// Returns whether one is shown.
+    fn draw_host_cursor(
+        &mut self,
+        ui: &egui::Ui,
+        ctx: &egui::Context,
+        rect: Rect,
+        visible: Rect,
+    ) -> bool {
+        let cursor = self
+            .handle
+            .shared
+            .cursor
+            .lock()
+            .ok()
+            .and_then(|cursor| cursor.clone());
+        let (Some(cursor), Some(frame)) = (cursor, self.displayed_frame.clone()) else {
+            self.cursor_texture = None;
+            return false;
+        };
+        let key = (cursor.serial, frame.sequence, self.texture_options);
+        if self
+            .cursor_texture
+            .as_ref()
+            .is_none_or(|(cached, ..)| *cached != key)
+        {
+            self.cursor_texture = render_cursor(&cursor, &frame).map(|(image, host_rect)| {
+                let texture = ctx.load_texture("host cursor", image, self.texture_options);
+                (key, texture, host_rect)
+            });
+        }
+        let Some((_, texture, host_rect)) = &self.cursor_texture else {
+            return false;
+        };
+        let scale = rect.width() / frame.width as f32;
+        let screen = Rect::from_min_size(
+            rect.min + host_rect.min.to_vec2() * scale,
+            host_rect.size() * scale,
+        );
+        ui.painter().with_clip_rect(visible).image(
+            texture.id(),
+            screen,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        true
     }
 
     /// Sharp pixels at whole-number scales, smooth filtering otherwise.
@@ -1380,6 +1448,55 @@ fn ctrl_alt_del() -> ViewerCommand {
         modifiers: USB_LEFT_CTRL | USB_LEFT_ALT,
         usage: USAGE_DELETE,
     }
+}
+
+/// Clips the 64×64 hardware cursor pattern to the framebuffer and turns it
+/// into RGBA. XOR pixels invert the framebuffer below, as on the host.
+fn render_cursor(cursor: &HostCursor, frame: &DecodedFrame) -> Option<(ColorImage, Rect)> {
+    const SIZE: usize = video::CURSOR_SIZE;
+    let x_offset = cursor.x_offset.clamp(0, SIZE as i16 - 1) as usize;
+    let y_offset = cursor.y_offset.clamp(0, SIZE as i16 - 1) as usize;
+    let x = cursor.x.max(0) as usize;
+    // The vendor client treats rows past 1200 as a wrapped negative value.
+    let y = if cursor.y > 1200 {
+        0
+    } else {
+        cursor.y.max(0) as usize
+    };
+    let (frame_width, frame_height) = (frame.width as usize, frame.height as usize);
+    let width = (SIZE - x_offset).min(frame_width.saturating_sub(x));
+    let height = (SIZE - y_offset).min(frame_height.saturating_sub(y));
+    if width == 0 || height == 0 || cursor.pattern.len() < SIZE * SIZE {
+        return None;
+    }
+    let nibble = |value: u16, shift: u32| ((value >> shift) & 0xf) as u8 * 17;
+    let mut rgba = vec![0_u8; width * height * 4];
+    for row in 0..height {
+        for column in 0..width {
+            let pixel = cursor.pattern[(row + y_offset) * SIZE + column + x_offset];
+            let color = [nibble(pixel, 8), nibble(pixel, 4), nibble(pixel, 0)];
+            let out = &mut rgba[(row * width + column) * 4..][..4];
+            if cursor.alpha {
+                out[..3].copy_from_slice(&color);
+                out[3] = nibble(pixel, 12);
+            } else if pixel & 0x8000 == 0 {
+                out[..3].copy_from_slice(&color);
+                out[3] = 255;
+            } else if pixel & 0x4000 != 0 {
+                let below = &frame.rgba[((y + row) * frame_width + x + column) * 4..][..3];
+                for (channel, value) in out.iter_mut().zip(below) {
+                    *channel = 255 - value;
+                }
+                out[3] = 255;
+            }
+        }
+    }
+    let image = ColorImage::from_rgba_unmultiplied([width, height], &rgba);
+    let host_rect = Rect::from_min_size(
+        Pos2::new(x as f32, y as f32),
+        Vec2::new(width as f32, height as f32),
+    );
+    Some((image, host_rect))
 }
 
 /// "CD-ROM: name.iso" for each drive with an image.
@@ -1554,6 +1671,35 @@ mod tests {
         assert_eq!(key_to_usage(Key::Enter), Some(0x28));
         assert_eq!(key_to_usage(Key::F12), Some(0x45));
         assert_eq!(key_to_usage(Key::ArrowUp), Some(0x52));
+    }
+
+    #[test]
+    fn cursor_pixels_follow_and_xor_rules() {
+        let mut pattern = vec![0x8000_u16; 64 * 64]; // AND 1, XOR 0: transparent
+        pattern[0] = 0x0f00; // AND 0: opaque red
+        pattern[1] = 0xc000; // AND 1, XOR 1: invert
+        let cursor = HostCursor {
+            serial: 1,
+            alpha: false,
+            x: 98,
+            y: 0,
+            x_offset: 0,
+            y_offset: 0,
+            pattern: Arc::new(pattern),
+        };
+        let frame = DecodedFrame {
+            width: 100,
+            height: 80,
+            sequence: 1,
+            rgba: vec![10; 100 * 80 * 4],
+        };
+        let (image, host_rect) = render_cursor(&cursor, &frame).unwrap();
+        // Clipped at the right edge: only two columns fit.
+        assert_eq!(image.size, [2, 64]);
+        assert_eq!(host_rect.min, Pos2::new(98.0, 0.0));
+        assert_eq!(image.pixels[0], Color32::from_rgb(255, 0, 0));
+        assert_eq!(image.pixels[1], Color32::from_rgb(245, 245, 245));
+        assert_eq!(image.pixels[2], Color32::TRANSPARENT);
     }
 
     #[test]

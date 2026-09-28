@@ -24,7 +24,7 @@ use crate::{
     scsi::{MediaImage, MediaKind},
     tls::{CertPolicy, FingerprintMismatch},
     tokend::Tokend,
-    video::{VideoEvent, VideoSession},
+    video::{CursorUpdate, VideoEvent, VideoSession},
     vmedia::{MediaChannel, MediaStats},
     web::{self, LoginRejected},
 };
@@ -79,6 +79,49 @@ pub struct DecodedFrame {
     pub height: u32,
     pub sequence: u64,
     pub rgba: Vec<u8>,
+}
+
+/// Host hardware cursor, drawn by the GUI over the framebuffer.
+#[derive(Debug, Clone)]
+pub struct HostCursor {
+    /// Changes on every update, so the GUI knows when to redraw.
+    pub serial: u64,
+    pub alpha: bool,
+    pub x: i16,
+    pub y: i16,
+    pub x_offset: i16,
+    pub y_offset: i16,
+    pub pattern: Arc<Vec<u16>>,
+}
+
+impl HostCursor {
+    /// Applies an update; `None` until a packet with a pattern arrived.
+    fn update(previous: Option<&HostCursor>, update: CursorUpdate) -> Option<Self> {
+        let serial = previous.map_or(1, |cursor| cursor.serial + 1);
+        let pattern = match (update.pattern, previous) {
+            (Some(pattern), _) => Arc::new(pattern),
+            (None, Some(previous)) => previous.pattern.clone(),
+            (None, None) => return None,
+        };
+        Some(match (update.position_only, previous) {
+            (true, Some(previous)) => Self {
+                serial,
+                x: update.x,
+                y: update.y,
+                pattern,
+                ..previous.clone()
+            },
+            _ => Self {
+                serial,
+                alpha: update.alpha,
+                x: update.x,
+                y: update.y,
+                x_offset: update.x_offset,
+                y_offset: update.y_offset,
+                pattern,
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +194,7 @@ impl Default for ViewerStatus {
 #[derive(Default)]
 pub struct ViewerShared {
     pub latest_frame: Mutex<Option<Arc<DecodedFrame>>>,
+    pub cursor: Mutex<Option<Arc<HostCursor>>>,
     pub status: Mutex<ViewerStatus>,
     pub keyboard_packets_sent: AtomicU64,
     pub mouse_packets_sent: AtomicU64,
@@ -295,6 +339,7 @@ fn run(
             session.close();
         }
         sockets.lock().map(|mut s| s.clear()).ok();
+        shared.cursor.lock().map(|mut cursor| cursor.take()).ok();
         set_status(&shared, &repaint, |status| {
             status.keyboard = false;
             status.leds = None;
@@ -463,6 +508,12 @@ fn session(
                 set_status(shared, repaint, |status| {
                     status.message = "Host video is blank (no signal)".into();
                 });
+            }
+            Ok(VideoEvent::Cursor(update)) => {
+                if let Ok(mut cursor) = shared.cursor.lock() {
+                    *cursor = HostCursor::update(cursor.as_deref(), update).map(Arc::new);
+                }
+                repaint();
             }
             Ok(event) => tracing::debug!(?event, "video event"),
             Err(error) if stop.load(Ordering::SeqCst) => {

@@ -221,9 +221,72 @@ fn parse_ast_header(raw: &[u8]) -> Result<AstFrameHeader, VideoError> {
 pub enum VideoEvent {
     Frame(CompressedFrame),
     BlankScreen,
+    Cursor(CursorUpdate),
     MouseMode(u8),
     ActiveClients(u8),
     Other(Packet),
+}
+
+/// Side of the square hardware cursor pattern, in pixels.
+pub const CURSOR_SIZE: usize = 64;
+const CURSOR_HEADER_LEN: usize = 57;
+
+/// Hardware cursor update (type 48, `docs/protocol.md` §5.7).
+#[derive(Clone)]
+pub struct CursorUpdate {
+    /// Pixels carry 4-bit alpha; otherwise AND/XOR bits.
+    pub alpha: bool,
+    /// Only `x`/`y` are valid; keep the previous type, offsets and pattern.
+    pub position_only: bool,
+    /// Host framebuffer position of the pattern's visible part.
+    pub x: i16,
+    pub y: i16,
+    /// First pattern column/row shown (cursor clipped at the left/top edge).
+    pub x_offset: i16,
+    pub y_offset: i16,
+    /// `CURSOR_SIZE`² pixels, row-major, when the shape changed.
+    pub pattern: Option<Vec<u16>>,
+}
+
+impl CursorUpdate {
+    fn parse(payload: &[u8]) -> Option<Self> {
+        if payload.len() < CURSOR_HEADER_LEN {
+            return None;
+        }
+        let signed = |offset| le_u16(payload, offset) as i16;
+        let pattern_bytes = CURSOR_SIZE * CURSOR_SIZE * 2;
+        let pattern = payload[CURSOR_HEADER_LEN..]
+            .get(..pattern_bytes)
+            .map(|bytes| {
+                bytes
+                    .chunks_exact(2)
+                    .map(|pixel| u16::from_le_bytes([pixel[0], pixel[1]]))
+                    .collect()
+            });
+        Some(Self {
+            alpha: le_u32(payload, 41) == 1,
+            position_only: le_u32(payload, 45) == 0,
+            x: signed(49),
+            y: signed(51),
+            x_offset: signed(53),
+            y_offset: signed(55),
+            pattern,
+        })
+    }
+}
+
+impl std::fmt::Debug for CursorUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CursorUpdate")
+            .field("alpha", &self.alpha)
+            .field("position_only", &self.position_only)
+            .field("x", &self.x)
+            .field("y", &self.y)
+            .field("x_offset", &self.x_offset)
+            .field("y_offset", &self.y_offset)
+            .field("pattern", &self.pattern.is_some())
+            .finish()
+    }
 }
 
 pub struct VideoSession {
@@ -366,6 +429,10 @@ impl VideoSession {
                         packet.payload.first().copied().unwrap_or(0),
                     ));
                 }
+                kind::HARDWARE_CURSOR => match CursorUpdate::parse(&packet.payload) {
+                    Some(cursor) => return Ok(VideoEvent::Cursor(cursor)),
+                    None => warn!(len = packet.payload.len(), "dropping short cursor packet"),
+                },
                 kind::ACTIVE_CLIENTS => {
                     return Ok(VideoEvent::ActiveClients(
                         packet.payload.first().copied().unwrap_or(0),
@@ -432,6 +499,28 @@ mod tests {
         ast[69..73].copy_from_slice(&(data.len() as u32).to_le_bytes());
         frame.extend_from_slice(data);
         frame
+    }
+
+    #[test]
+    fn parses_cursor_packets() {
+        let mut payload = vec![0_u8; CURSOR_HEADER_LEN];
+        payload[41] = 1;
+        payload[45] = 7;
+        payload[49..51].copy_from_slice(&100_u16.to_le_bytes());
+        payload[51..53].copy_from_slice(&50_u16.to_le_bytes());
+        payload[53] = 2;
+        let moved = CursorUpdate::parse(&payload).unwrap();
+        assert!(moved.alpha && !moved.position_only && moved.pattern.is_none());
+        assert_eq!(
+            (moved.x, moved.y, moved.x_offset, moved.y_offset),
+            (100, 50, 2, 0)
+        );
+        payload.extend(std::iter::repeat_n(0_u8, CURSOR_SIZE * CURSOR_SIZE * 2));
+        payload[CURSOR_HEADER_LEN] = 0x34;
+        payload[CURSOR_HEADER_LEN + 1] = 0x12;
+        let shaped = CursorUpdate::parse(&payload).unwrap();
+        assert_eq!(shaped.pattern.unwrap()[0], 0x1234);
+        assert!(CursorUpdate::parse(&payload[..56]).is_none());
     }
 
     #[test]
