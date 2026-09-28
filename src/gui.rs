@@ -14,6 +14,7 @@ use crate::{
     hid,
     keymap::{self, Layout},
     scsi::MediaKind,
+    settings::Settings,
     viewer::{
         ConnectionState, DecodedFrame, MediaStatus, Source, ViewerCommand, ViewerHandle,
         ViewerStatus, spawn_viewer,
@@ -58,30 +59,70 @@ pub struct IlomApp {
     password: String,
     capture_dir: PathBuf,
     host_key: HostKey,
+    layout: Layout,
+    /// Remembered choices, rewritten when the user changes one in the GUI.
+    settings: Settings,
+    settings_path: Option<PathBuf>,
     form_error: Option<String>,
 }
 
+/// Values the GUI starts with, already merged from options and settings.
+pub struct Startup {
+    pub host: Option<String>,
+    pub username: String,
+    pub password: Option<String>,
+    pub capture_dir: PathBuf,
+    pub host_key: HostKey,
+    pub layout: Layout,
+    pub settings: Settings,
+    pub settings_path: Option<PathBuf>,
+}
+
 impl IlomApp {
-    pub fn new(
-        host: Option<String>,
-        username: String,
-        password: Option<String>,
-        capture_dir: PathBuf,
-        host_key: HostKey,
-        initial: Option<Source>,
-        context: &egui::Context,
-    ) -> Self {
-        let viewer =
-            initial.map(|source| ViewerApp::new(context, source, capture_dir.clone(), host_key));
+    pub fn new(startup: Startup, initial: Option<Source>, context: &egui::Context) -> Self {
+        let viewer = initial.map(|source| {
+            ViewerApp::new(
+                context,
+                source,
+                startup.capture_dir.clone(),
+                startup.host_key,
+                startup.layout,
+            )
+        });
         Self {
             viewer,
-            host: host.unwrap_or_default(),
-            username,
-            password: password.unwrap_or_default(),
-            capture_dir,
-            host_key,
+            host: startup.host.unwrap_or_default(),
+            username: startup.username,
+            password: startup.password.unwrap_or_default(),
+            capture_dir: startup.capture_dir,
+            host_key: startup.host_key,
+            layout: startup.layout,
+            settings: startup.settings,
+            settings_path: startup.settings_path,
             form_error: None,
         }
+    }
+
+    fn save_settings(&self) {
+        let Some(path) = &self.settings_path else {
+            return;
+        };
+        if let Err(error) = self.settings.save(path) {
+            tracing::warn!(error = %format!("{error:#}"), "could not save settings");
+        }
+    }
+
+    /// Remembers host key and layout changes made in the viewer menus.
+    fn remember_viewer_choices(&mut self, host_key: HostKey, layout: Layout) {
+        if host_key == self.host_key && layout == self.layout {
+            return;
+        }
+        self.host_key = host_key;
+        self.layout = layout;
+        self.settings.host_key =
+            clap::ValueEnum::to_possible_value(&host_key).map(|value| value.get_name().to_owned());
+        self.settings.layout = Some(layout.id().to_owned());
+        self.save_settings();
     }
 
     fn show_login(&mut self, ui: &mut egui::Ui) -> Option<Source> {
@@ -158,6 +199,11 @@ impl IlomApp {
         match self.web_source() {
             Ok(source) => {
                 self.form_error = None;
+                if let Source::Web { host, username, .. } = &source {
+                    self.settings.host = Some(host.clone());
+                    self.settings.username = Some(username.clone());
+                    self.save_settings();
+                }
                 Some(source)
             }
             Err(error) => {
@@ -194,10 +240,12 @@ impl eframe::App for IlomApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if let Some(viewer) = self.viewer.as_mut() {
             eframe::App::ui(viewer, ui, frame);
-            self.host_key = viewer.host_key_choice;
+            let (host_key, layout) = (viewer.host_key_choice, viewer.layout);
             let rejected = viewer.rejection();
             let login = viewer.login.clone();
-            if viewer.disconnect_requested || rejected.is_some() {
+            let leaving = viewer.disconnect_requested || rejected.is_some();
+            self.remember_viewer_choices(host_key, layout);
+            if leaving {
                 // A rejected session goes back to the form instead of retrying.
                 if let Some((credentials, message)) = rejected {
                     if let Some((host, username)) = login {
@@ -227,6 +275,7 @@ impl eframe::App for IlomApp {
                 source,
                 self.capture_dir.clone(),
                 self.host_key,
+                self.layout,
             ));
         }
     }
@@ -321,7 +370,7 @@ pub struct ViewerApp {
     handle: ViewerHandle,
     /// Host and username of a web login, to refill the form after a rejection.
     login: Option<(String, String)>,
-    layout: Layout,
+    pub layout: Layout,
     texture: Option<TextureHandle>,
     displayed_frame: Option<Arc<DecodedFrame>>,
     pressed_usages: BTreeSet<u8>,
@@ -353,6 +402,7 @@ impl ViewerApp {
         source: Source,
         capture_dir: PathBuf,
         host_key_choice: HostKey,
+        layout: Layout,
     ) -> Self {
         context.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "{} — {APP_TITLE}",
@@ -367,7 +417,7 @@ impl ViewerApp {
         Self {
             handle,
             login,
-            layout: Layout::from_locale(),
+            layout,
             texture: None,
             displayed_frame: None,
             pressed_usages: BTreeSet::new(),

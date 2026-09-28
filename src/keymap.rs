@@ -27,6 +27,18 @@ impl Layout {
         }
     }
 
+    /// Stable id for the settings file.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Us => "us",
+            Self::French => "fr",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|layout| layout.id() == id)
+    }
+
     /// Guess from the local locale; the host usually matches it.
     pub fn from_locale() -> Self {
         let lang = std::env::var("LC_ALL")

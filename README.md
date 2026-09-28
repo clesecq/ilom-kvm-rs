@@ -83,8 +83,17 @@ RUST_LOG=ilom_kvm=debug cargo run -- probe --frames 3          # saves PNGs to c
 RUST_LOG=ilom_kvm=debug cargo run -- probe --jnlp file.jnlp
 ```
 
+Files live in the config directory: `~/.config/ilom-kvm` on Linux,
+`~/Library/Application Support/ilom-kvm` on macOS (an existing
+`~/.config/ilom-kvm` is kept) and `%APPDATA%\ilom-kvm` on Windows.
+`XDG_CONFIG_HOME` overrides it everywhere.
+
+The GUI remembers the last host, username, host key and host layout in
+`settings` (override with `ILOM_SETTINGS`); the password is never stored.
+Command-line options and environment variables win over saved values.
+
 The first web login to an ILOM stores its certificate fingerprint in
-`~/.config/ilom-kvm/known_certs` (override with `ILOM_KNOWN_CERTS`). Later
+`known_certs` (override with `ILOM_KNOWN_CERTS`). Later
 logins refuse a different certificate before sending the password. After a
 legitimate certificate change, run `ilom-kvm forget-cert <host>`.
 

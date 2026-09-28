@@ -9,6 +9,7 @@ pub mod keymap;
 pub mod known_certs;
 pub mod rc4;
 pub mod scsi;
+pub mod settings;
 pub mod tls;
 pub mod tokend;
 pub mod video;

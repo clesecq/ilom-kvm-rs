@@ -4,11 +4,13 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilom_kvm::{
     codec::AspeedCodec,
-    gui::{HostKey, IlomApp},
+    gui::{HostKey, IlomApp, Startup},
     hid::HidSession,
     jnlp::{self, ConsoleArgs},
+    keymap::Layout,
     known_certs::KnownCerts,
     scsi::{MediaImage, MediaKind},
+    settings::Settings,
     tls::CertPolicy,
     tokend::Tokend,
     video::{VideoEvent, VideoSession},
@@ -50,20 +52,22 @@ struct ViewerArgs {
     /// Connect straight away with a downloaded JNLP file.
     #[arg(long)]
     jnlp: Option<PathBuf>,
-    /// ILOM address prefilled in the login form.
+    /// ILOM address prefilled in the login form [default: last one used].
     #[arg(long, env = "ILOM_HOST")]
     host: Option<String>,
-    #[arg(long, env = "ILOM_USER", default_value = "root")]
-    user: String,
+    /// [default: last one used, else root]
+    #[arg(long, env = "ILOM_USER")]
+    user: Option<String>,
     /// Connect straight away using ILOM_HOST/ILOM_USER/ILOM_PASSWORD.
     #[arg(long)]
     auto: bool,
     #[arg(long, default_value = "captures")]
     capture_dir: PathBuf,
     /// Client key never sent to the host: tap to capture or release the
-    /// keyboard, hold for shortcuts (F fullscreen, V paste, Del Ctrl+Alt+Del).
-    #[arg(long, env = "ILOM_HOST_KEY", value_enum, default_value_t)]
-    host_key: HostKey,
+    /// keyboard, hold for shortcuts (F fullscreen, V paste, Del Ctrl+Alt+Del)
+    /// [default: last one chosen, else right-ctrl].
+    #[arg(long, env = "ILOM_HOST_KEY", value_enum)]
+    host_key: Option<HostKey>,
 }
 
 #[derive(clap::Args)]
@@ -145,13 +149,12 @@ fn main() -> Result<()> {
         Some(Command::Media(args)) => media(args),
         Some(Command::ForgetCert { host }) => forget_cert(&host),
         None => viewer(ViewerArgs {
-            user: std::env::var("ILOM_USER").unwrap_or_else(|_| "root".into()),
+            user: std::env::var("ILOM_USER").ok(),
             host: std::env::var("ILOM_HOST").ok(),
             capture_dir: "captures".into(),
             host_key: std::env::var("ILOM_HOST_KEY")
                 .ok()
-                .and_then(|value| clap::ValueEnum::from_str(&value, true).ok())
-                .unwrap_or_default(),
+                .and_then(|value| clap::ValueEnum::from_str(&value, true).ok()),
             ..Default::default()
         }),
     }
@@ -159,14 +162,54 @@ fn main() -> Result<()> {
 
 fn viewer(args: ViewerArgs) -> Result<()> {
     let password = std::env::var("ILOM_PASSWORD").ok();
+    // Options and environment win over saved settings, which win over defaults.
+    let settings_path = Settings::default_path()
+        .inspect_err(|error| warn!(error = %format!("{error:#}"), "settings disabled"))
+        .ok();
+    let settings = settings_path
+        .as_ref()
+        .map(|path| {
+            Settings::load(path).unwrap_or_else(|error| {
+                warn!(error = %format!("{error:#}"), "ignoring unreadable settings");
+                Settings::default()
+            })
+        })
+        .unwrap_or_default();
+    let host = args.host.or_else(|| settings.host.clone());
+    let username = args
+        .user
+        .or_else(|| settings.username.clone())
+        .unwrap_or_else(|| "root".into());
+    let host_key = args
+        .host_key
+        .or_else(|| {
+            let saved = settings.host_key.as_deref()?;
+            clap::ValueEnum::from_str(saved, true).ok()
+        })
+        .unwrap_or_default();
+    let layout = settings
+        .layout
+        .as_deref()
+        .and_then(Layout::from_id)
+        .unwrap_or_else(Layout::from_locale);
     let initial = match (&args.jnlp, args.auto) {
         (Some(path), _) => Some(Source::Jnlp(path.clone())),
         (None, true) => Some(Source::Web {
-            host: args.host.clone().context("--auto needs ILOM_HOST")?,
-            username: args.user.clone(),
+            host: host.clone().context("--auto needs ILOM_HOST")?,
+            username: username.clone(),
             password: password.clone().context("--auto needs ILOM_PASSWORD")?,
         }),
         (None, false) => None,
+    };
+    let startup = Startup {
+        host,
+        username,
+        password,
+        capture_dir: args.capture_dir,
+        host_key,
+        layout,
+        settings,
+        settings_path,
     };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -178,17 +221,7 @@ fn viewer(args: ViewerArgs) -> Result<()> {
     eframe::run_native(
         "ILOM Remote Console",
         options,
-        Box::new(move |cc| {
-            Ok(Box::new(IlomApp::new(
-                args.host,
-                args.user,
-                password,
-                args.capture_dir,
-                args.host_key,
-                initial,
-                &cc.egui_ctx,
-            )))
-        }),
+        Box::new(move |cc| Ok(Box::new(IlomApp::new(startup, initial, &cc.egui_ctx)))),
     )
     .map_err(|error| anyhow::anyhow!("GUI failed: {error}"))
 }
