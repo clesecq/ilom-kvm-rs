@@ -35,7 +35,7 @@ jobs:
       - name: Check tag matches Cargo.toml version
         shell: bash
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ilom-kvm") | .version')
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
@@ -60,7 +60,7 @@ jobs:
           fi
           if [ "$RUNNER_OS" = "Linux" ]; then
             cp LICENSE dist/LICENSE
-            cp third_party/aspeed_codec/LICENSE dist/LICENSE-aspeed_codec
+            cp crates/ilom-kvm-core/third_party/aspeed_codec/LICENSE dist/LICENSE-aspeed_codec
           fi
           cd dist
           if [ "$RUNNER_OS" = "macOS" ]; then

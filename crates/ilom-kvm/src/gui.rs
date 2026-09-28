@@ -10,18 +10,18 @@ use eframe::egui::{
     TextureOptions, Vec2,
 };
 
-use crate::{
-    clipboard::Clipboard,
+use ilom_kvm_core::{
     hid,
     keymap::{self, Layout},
     scsi::MediaKind,
-    settings::Settings,
-    video,
-    viewer::{
+    session::{
         ConnectionState, DecodedFrame, HostCursor, MediaStatus, Source, ViewerCommand,
         ViewerHandle, ViewerStatus, spawn_viewer,
     },
+    video,
 };
+
+use crate::{clipboard::Clipboard, settings::Settings};
 
 const USB_LEFT_CTRL: u8 = 0x01;
 const USB_LEFT_ALT: u8 = 0x04;

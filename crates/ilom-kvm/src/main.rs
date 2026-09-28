@@ -3,19 +3,19 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilom_kvm::{
-    codec::AspeedCodec,
-    config,
     gui::{HostKey, IlomApp, Startup, ViewerPrefs},
+    settings::{self, Settings},
+};
+use ilom_kvm_core::{
+    codec::AspeedCodec,
     hid::HidSession,
     jnlp::{self, ConsoleArgs},
     keymap::Layout,
     known_certs::KnownCerts,
     scsi::{MediaImage, MediaKind},
-    settings::Settings,
-    tls::CertPolicy,
+    session::{Source, cert_policy},
     tokend::Tokend,
     video::{VideoEvent, VideoSession},
-    viewer::Source,
     vmedia::MediaChannel,
     web,
 };
@@ -206,7 +206,7 @@ fn viewer(args: ViewerArgs) -> Result<()> {
         host,
         username,
         password,
-        capture_dir: args.capture_dir.unwrap_or_else(config::screenshot_dir),
+        capture_dir: args.capture_dir.unwrap_or_else(settings::screenshot_dir),
         prefs: ViewerPrefs {
             host_key,
             layout,
@@ -250,16 +250,6 @@ fn forget_cert(host: &str) -> Result<()> {
 fn load_jnlp(path: &PathBuf) -> Result<ConsoleArgs> {
     let xml = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     jnlp::parse(&xml)
-}
-
-fn cert_policy(args: &ConsoleArgs) -> CertPolicy {
-    match args.fingerprint {
-        Some(fingerprint) => CertPolicy::Pinned(fingerprint),
-        None => {
-            warn!("JNLP has no certificate fingerprint; TLS peer is not verified");
-            CertPolicy::Insecure
-        }
-    }
 }
 
 fn is_timeout(error: &anyhow::Error) -> bool {

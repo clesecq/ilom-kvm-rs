@@ -911,8 +911,10 @@ outputs **RGBA** with opaque alpha.
 
 ### 7.11 `ilom-kvm-rs` implementation status
 
-- There is no native Rust decoder. `src/codec.rs` runs AspeedTech's MPL-2.0
-  decoder (`third_party/aspeed_codec/decoder_wasm.wasm`) in `wasmi`.
+- There is no native Rust decoder. `crates/ilom-kvm-core/src/codec.rs` runs
+  AspeedTech's MPL-2.0 decoder
+  (`crates/ilom-kvm-core/third_party/aspeed_codec/decoder_wasm.wasm`) in
+  `wasmi`.
 - It passes the stream, an RGBA output buffer, the **source** size, Mode420,
   and both table selectors.
 - It does not pass the scale factors, the YUV table mapping, the destination
@@ -1312,8 +1314,8 @@ usage through `.properties` tables:
   NumLock, CapsLock, ScrollLock, PrintScreen, Pause and Menu through
   F14–F35; the GUI maps these back to the proper usages. Upstream egui-winit
   folds keypad digits onto the top row and has no lock keys.
-- `src/keymap.rs` (clipboard paste only) converts *text* to
-  (modifier, usage) strokes for a chosen **host** layout: US, or French
+- `crates/ilom-kvm-core/src/keymap.rs` (clipboard paste only) converts
+  *text* to (modifier, usage) strokes for a chosen **host** layout: US, or French
   AZERTY with the AltGr layer and dead-key accents (`^`/`¨` on usage 0x2F,
   then the base letter).
 
@@ -1427,8 +1429,8 @@ No TLS, no IVTP framing, and no username/password login: one token
 authenticates the channel. IUSB fields are little-endian; CDB bytes keep
 normal SCSI big-endian order.
 
-**Status:** implemented in `ilom-kvm-rs` (`src/vmedia.rs`, `src/scsi.rs`) for
-image files. The layout and command set below come from the vendor Java code
+**Status:** implemented in `ilom-kvm-rs` (`vmedia.rs` and `scsi.rs` in
+`crates/ilom-kvm-core/src`) for image files. The layout and command set below come from the vendor Java code
 and from the exported functions of its Linux image readers; the handshake,
 the packet layout and the host command traffic were then checked against a
 live SP (floppy image read by the host, CD image enumerated and read).

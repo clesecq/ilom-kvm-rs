@@ -115,6 +115,14 @@ away, because the ILOM has only a few web session slots.
 
 ## How it works
 
+The repository is a Cargo workspace:
+
+- `crates/ilom-kvm-core`: protocol and session library, with no GUI code.
+- `crates/ilom-kvm`: the egui viewer and the `probe`, `media` and
+  `forget-cert` commands.
+
+Main modules of `ilom-kvm-core`:
+
 - `web.rs`: minimal HTTP/1.0 client. The ILOM web server repeats status lines
   and mixes line endings, which strict HTTP stacks reject.
 - `tokend.rs`: exchanges the JNLP user and secret for 20-byte redirection
@@ -125,6 +133,8 @@ away, because the ILOM has only a few web session slots.
 - `hid.rs`: `HIDCMD` handshake, AES key derivation, IUSB input reports.
 - `vmedia.rs`, `scsi.rs`: virtual media channels and the SCSI command set of
   the vendor image readers (CD-ROM and floppy/USB).
+- `session.rs`: background session for front ends: decoded frames, host
+  cursor, keyboard/mouse commands, media mounts and reconnects.
 
 ## Clean-room note and licences
 
@@ -132,8 +142,8 @@ The protocol was reimplemented from observation and from reading the vendor
 client. No vendor code is included. Decompiled references stay local in the
 git-ignored `reference/` directory.
 
-`third_party/aspeed_codec/decoder_wasm.wasm` is an unmodified build from
-[AspeedTech-BMC/aspeed_codec](https://github.com/AspeedTech-BMC/aspeed_codec)
+`crates/ilom-kvm-core/third_party/aspeed_codec/decoder_wasm.wasm` is an
+unmodified build from [AspeedTech-BMC/aspeed_codec](https://github.com/AspeedTech-BMC/aspeed_codec)
 under MPL-2.0. The Rust code is MIT licensed.
 
 Keep service processors on a management network. Never expose them to the

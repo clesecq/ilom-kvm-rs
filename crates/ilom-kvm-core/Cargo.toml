@@ -1,0 +1,22 @@
+[package]
+name = "ilom-kvm-core"
+description = "Protocol and session library for the Oracle ILOM Remote System Console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aes = "0.9"
+anyhow.workspace = true
+cbc = { version = "0.2", features = ["alloc", "block-padding"] }
+dirs.workspace = true
+hex.workspace = true
+md-5 = { version = "0.11.0", default-features = false }
+native-tls = "0.2.18"
+pwhash = { version = "1.0.0", default-features = false }
+roxmltree = "0.21.1"
+sha2 = "0.11.0"
+socket2 = { version = "0.6", features = ["all"] }
+thiserror = "2.0"
+tracing.workspace = true
+wasmi = "2.0"

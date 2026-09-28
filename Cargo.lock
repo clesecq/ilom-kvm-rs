@@ -1865,28 +1865,39 @@ dependencies = [
 name = "ilom-kvm"
 version = "0.1.1"
 dependencies = [
- "aes",
  "anyhow",
  "arboard",
- "cbc",
  "clap",
  "dirs",
  "dotenvy",
  "eframe",
  "hex",
+ "ilom-kvm-core",
  "image",
+ "raw-window-handle",
+ "rfd",
+ "smithay-clipboard",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ilom-kvm-core"
+version = "0.1.1"
+dependencies = [
+ "aes",
+ "anyhow",
+ "cbc",
+ "dirs",
+ "hex",
  "md-5 0.11.0",
  "native-tls",
  "pwhash",
- "raw-window-handle",
- "rfd",
  "roxmltree",
  "sha2 0.11.0",
- "smithay-clipboard",
  "socket2",
  "thiserror 2.0.21",
  "tracing",
- "tracing-subscriber",
  "wasmi",
 ]
 

@@ -1,38 +1,22 @@
-[package]
-name = "ilom-kvm"
+[workspace]
+resolver = "3"
+members = ["crates/ilom-kvm-core", "crates/ilom-kvm"]
+default-members = ["crates/ilom-kvm"]
+
+[workspace.package]
 version = "0.1.1"
 edition = "2024"
 license = "MIT"
-description = "Java-free native client for the Oracle ILOM Remote System Console"
 
-[dependencies]
-aes = "0.9"
+[workspace.dependencies]
+ilom-kvm-core = { path = "crates/ilom-kvm-core" }
 anyhow = "1.0"
-arboard = "3"
-cbc = { version = "0.2", features = ["alloc", "block-padding"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
+dirs = "6"
 dotenvy = "0.15.7"
-eframe = "0.36.2"
-rfd = "0.17"
 hex = "0.4.3"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
-md-5 = { version = "0.11.0", default-features = false }
-native-tls = "0.2.18"
-raw-window-handle = "0.6"
-pwhash = { version = "1.0.0", default-features = false }
-roxmltree = "0.21.1"
-sha2 = "0.11.0"
-thiserror = "2.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-wasmi = "2.0"
-socket2 = { version = "0.6", features = ["all"] }
-dirs = "6"
-
-# Wayland clipboard through the window's own connection: works on GNOME,
-# which lacks the data-control protocols arboard needs.
-[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
-smithay-clipboard = "0.7"
 
 [patch.crates-io]
 egui-winit = { path = "third_party/egui-winit" }

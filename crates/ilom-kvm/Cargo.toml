@@ -1,0 +1,26 @@
+[package]
+name = "ilom-kvm"
+description = "Java-free native client for the Oracle ILOM Remote System Console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ilom-kvm-core.workspace = true
+anyhow.workspace = true
+arboard = "3"
+clap.workspace = true
+dirs.workspace = true
+dotenvy.workspace = true
+eframe = "0.36.2"
+hex.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+rfd = "0.17"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Wayland clipboard through the window's own connection: works on GNOME,
+# which lacks the data-control protocols arboard needs.
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
+smithay-clipboard = "0.7"
