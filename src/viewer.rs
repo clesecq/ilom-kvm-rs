@@ -169,6 +169,12 @@ pub enum ViewerCommand {
         modifiers: u8,
         usage: u8,
     },
+    /// Pointer motion for SPs in relative mouse mode.
+    MouseRelative {
+        buttons: u8,
+        dx: i8,
+        dy: i8,
+    },
     MouseAbsolute {
         buttons: u8,
         x: u32,
@@ -549,6 +555,9 @@ fn input_loop(
             ViewerCommand::Keystroke { modifiers, usage } => session
                 .send_keystroke(modifiers, usage)
                 .map(|_| shared.keyboard_packets_sent.fetch_add(1, Ordering::Relaxed)),
+            ViewerCommand::MouseRelative { buttons, dx, dy } => session
+                .send_relative_mouse(buttons, dx, dy)
+                .map(|_| shared.mouse_packets_sent.fetch_add(1, Ordering::Relaxed)),
             ViewerCommand::MouseAbsolute {
                 buttons,
                 x,

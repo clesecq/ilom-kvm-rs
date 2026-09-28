@@ -1189,8 +1189,11 @@ and clamps the position. The last pixel therefore maps to exactly 32767
   [§11](#11-quirks-and-pitfalls)).
 - It keeps the local pointer centred with `java.awt.Robot`.
 
-`ilom-kvm-rs` has a relative encoder, but the viewer uses absolute mode only.
-When the SP selects relative mode, it logs a warning.
+When the SP selects relative mode, the `ilom-kvm-rs` viewer locks and hides
+the local cursor while the console is captured, and sends raw mouse motion
+deltas without the vendor's 1.5 divisor. Large moves are split into ±127
+steps and the fraction is carried to the next report. *(uncertain: never
+seen live; the test SP always selects absolute mode.)*
 
 ### 8.7 Messages from the SP
 

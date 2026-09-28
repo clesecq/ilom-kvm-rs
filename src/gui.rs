@@ -192,8 +192,12 @@ impl eframe::App for IlomApp {
             eframe::App::ui(viewer, ui, frame);
             if viewer.disconnect_requested {
                 self.viewer = None;
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Title(APP_TITLE.into()));
+                let ctx = ui.ctx();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(APP_TITLE.into()));
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                    egui::viewport::CursorGrab::None,
+                ));
+                ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
             }
             return;
         }
@@ -238,6 +242,9 @@ pub struct ViewerApp {
     pressed_usages: BTreeSet<u8>,
     modifiers: u8,
     mouse_buttons: u8,
+    /// Unsent relative-mode motion, in host pixels.
+    relative_motion: Vec2,
+    cursor_grabbed: bool,
     fullscreen: bool,
     notice: Option<(String, Instant)>,
     capture_dir: PathBuf,
@@ -266,6 +273,8 @@ impl ViewerApp {
             pressed_usages: BTreeSet::new(),
             modifiers: 0,
             mouse_buttons: 0,
+            relative_motion: Vec2::ZERO,
+            cursor_grabbed: false,
             fullscreen: false,
             notice: None,
             capture_dir,
@@ -417,7 +426,17 @@ impl ViewerApp {
         action
     }
 
-    fn handle_mouse(&mut self, ctx: &egui::Context, image_rect: Rect, focused: bool) {
+    fn handle_mouse(
+        &mut self,
+        ctx: &egui::Context,
+        image_rect: Rect,
+        focused: bool,
+        absolute: bool,
+    ) {
+        if !absolute {
+            self.handle_relative_mouse(ctx, focused);
+            return;
+        }
         let Some(frame) = self.displayed_frame.clone() else {
             return;
         };
@@ -435,12 +454,7 @@ impl ViewerApp {
                     pressed,
                     ..
                 } if image_rect.contains(pos) || self.mouse_buttons != 0 => {
-                    let bit = match button {
-                        PointerButton::Primary => hid::BUTTON_LEFT,
-                        PointerButton::Secondary => hid::BUTTON_RIGHT,
-                        PointerButton::Middle => hid::BUTTON_MIDDLE,
-                        _ => 0,
-                    };
+                    let bit = button_bit(button);
                     if pressed {
                         self.mouse_buttons |= bit;
                     } else {
@@ -451,6 +465,65 @@ impl ViewerApp {
                 _ => {}
             }
         }
+    }
+
+    /// Relative mode: the local cursor is locked while captured, and raw
+    /// motion deltas go to the host.
+    fn handle_relative_mouse(&mut self, ctx: &egui::Context, focused: bool) {
+        if !focused {
+            self.relative_motion = Vec2::ZERO;
+            return;
+        }
+        let events = ctx.input(|input| input.events.clone());
+        for event in events {
+            match event {
+                Event::MouseMoved(delta) => self.relative_motion += delta,
+                Event::PointerButton {
+                    button, pressed, ..
+                } => {
+                    let bit = button_bit(button);
+                    if pressed {
+                        self.mouse_buttons |= bit;
+                    } else {
+                        self.mouse_buttons &= !bit;
+                    }
+                    self.send(ViewerCommand::MouseRelative {
+                        buttons: self.mouse_buttons,
+                        dx: 0,
+                        dy: 0,
+                    });
+                }
+                _ => {}
+            }
+        }
+        // Reports carry i8 deltas: split big moves, keep the fraction.
+        let step = |value: f32| value.round().clamp(-127.0, 127.0);
+        loop {
+            let (dx, dy) = (step(self.relative_motion.x), step(self.relative_motion.y));
+            if dx == 0.0 && dy == 0.0 {
+                break;
+            }
+            self.relative_motion -= Vec2::new(dx, dy);
+            self.send(ViewerCommand::MouseRelative {
+                buttons: self.mouse_buttons,
+                dx: dx as i8,
+                dy: dy as i8,
+            });
+        }
+    }
+
+    /// Locks and hides the local cursor while a relative-mode host is captured.
+    fn set_cursor_grab(&mut self, ctx: &egui::Context, grab: bool) {
+        if self.cursor_grabbed == grab {
+            return;
+        }
+        self.cursor_grabbed = grab;
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if grab {
+            egui::viewport::CursorGrab::Locked
+        } else {
+            egui::viewport::CursorGrab::None
+        }));
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(!grab));
     }
 
     fn send_mouse(&self, pos: Pos2, rect: Rect, frame: &DecodedFrame) {
@@ -777,7 +850,13 @@ impl eframe::App for ViewerApp {
                 if !status.keyboard {
                     ui.weak("Keyboard/mouse off");
                 } else if let Some(id) = self.captured_by {
-                    ui.colored_label(Color32::from_rgb(90, 160, 255), "⌨ Keyboard captured")
+                    let text = if status.absolute_mouse {
+                        "⌨ Keyboard captured"
+                    } else {
+                        // The locked cursor cannot reach the Release button.
+                        "⌨ Keyboard and mouse captured (Right Ctrl releases)"
+                    };
+                    ui.colored_label(Color32::from_rgb(90, 160, 255), text)
                         .on_hover_text(HOST_KEY_HELP);
                     if ui
                         .small_button("Release")
@@ -916,7 +995,9 @@ impl eframe::App for ViewerApp {
                     Some(HostAction::CtrlAltDel) => self.send(ctrl_alt_del()),
                     None => {}
                 }
-                self.handle_mouse(&ctx, rect, focused);
+                let absolute = status.absolute_mouse;
+                self.set_cursor_grab(&ctx, focused && status.keyboard && !absolute);
+                self.handle_mouse(&ctx, rect, focused, absolute);
             });
     }
 }
@@ -925,6 +1006,15 @@ impl Drop for ViewerApp {
     fn drop(&mut self) {
         self.release_input();
         self.handle.stop_and_wait();
+    }
+}
+
+fn button_bit(button: PointerButton) -> u8 {
+    match button {
+        PointerButton::Primary => hid::BUTTON_LEFT,
+        PointerButton::Secondary => hid::BUTTON_RIGHT,
+        PointerButton::Middle => hid::BUTTON_MIDDLE,
+        _ => 0,
     }
 }
 
@@ -1098,7 +1188,10 @@ mod tests {
     #[test]
     fn host_key_shortcuts() {
         assert_eq!(HostAction::for_key(Key::F), Some(HostAction::Fullscreen));
-        assert_eq!(HostAction::for_key(Key::Delete), Some(HostAction::CtrlAltDel));
+        assert_eq!(
+            HostAction::for_key(Key::Delete),
+            Some(HostAction::CtrlAltDel)
+        );
         assert_eq!(HostAction::for_key(Key::A), None);
         assert_eq!(modifier_bit(HOST_KEY), Some(0x10));
     }
