@@ -28,3 +28,9 @@ wasmi = "2.0"
 
 [patch.crates-io]
 egui-winit = { path = "third_party/egui-winit" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
