@@ -215,6 +215,8 @@ pub struct ViewerApp {
     notice: Option<(String, Instant)>,
     capture_dir: PathBuf,
     disconnect_requested: bool,
+    /// Framebuffer widget holding keyboard focus in the last frame, if any.
+    captured_by: Option<egui::Id>,
     /// Let the host write to the next floppy image mounted.
     floppy_writable: bool,
 }
@@ -239,6 +241,7 @@ impl ViewerApp {
             notice: None,
             capture_dir,
             disconnect_requested: false,
+            captured_by: None,
             floppy_writable: false,
         }
     }
@@ -685,11 +688,23 @@ impl eframe::App for ViewerApp {
                     ui.label(format!("{}×{}", frame.width, frame.height));
                 }
                 ui.separator();
-                ui.label(if status.keyboard {
-                    "Keyboard/mouse on"
+                if !status.keyboard {
+                    ui.weak("Keyboard/mouse off");
+                } else if let Some(id) = self.captured_by {
+                    ui.colored_label(Color32::from_rgb(90, 160, 255), "⌨ Keyboard captured");
+                    if ui
+                        .small_button("Release")
+                        .on_hover_text("Stop sending keys to the host")
+                        .clicked()
+                    {
+                        ui.memory_mut(|memory| memory.surrender_focus(id));
+                    }
                 } else {
-                    "Keyboard/mouse off"
-                });
+                    ui.colored_label(
+                        Color32::from_rgb(235, 185, 70),
+                        "Click the screen to capture the keyboard",
+                    );
+                }
                 ui.separator();
                 ui.add_enabled_ui(status.keyboard, |ui| self.send_keys_menu(ui));
                 ui.add_enabled_ui(status.keyboard, |ui| self.keyboard_menu(ui, status.leds));
@@ -765,6 +780,7 @@ impl eframe::App for ViewerApp {
                     response.request_focus();
                 }
                 let focused = response.has_focus();
+                self.captured_by = focused.then_some(response.id);
                 if focused {
                     // Keep Tab and arrows for the host instead of egui focus moves.
                     ui.memory_mut(|memory| {
