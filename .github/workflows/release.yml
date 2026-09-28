@@ -58,6 +58,10 @@ jobs:
           else
             cp target/release/ilom-kvm "dist/$name"
           fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cp LICENSE dist/LICENSE
+            cp third_party/aspeed_codec/LICENSE dist/LICENSE-aspeed_codec
+          fi
           cd dist
           if [ "$RUNNER_OS" = "macOS" ]; then
             shasum -a 256 "$name" > "$name.sha256"
