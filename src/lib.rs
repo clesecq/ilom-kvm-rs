@@ -3,6 +3,7 @@ pub mod config;
 pub mod crypto;
 pub mod gui;
 pub mod hid;
+pub mod icon;
 pub mod ivtp;
 pub mod jnlp;
 pub mod keymap;

@@ -219,7 +219,8 @@ fn viewer(args: ViewerArgs) -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("ILOM Remote Console")
             .with_inner_size([1100.0, 850.0])
-            .with_min_inner_size([640.0, 480.0]),
+            .with_min_inner_size([640.0, 480.0])
+            .with_icon(std::sync::Arc::new(ilom_kvm::icon::icon_data())),
         ..Default::default()
     };
     eframe::run_native(
