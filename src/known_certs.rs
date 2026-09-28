@@ -16,7 +16,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::{jnlp, tls};
+use crate::{config, jnlp, tls};
 
 /// Overrides the store location (used by tests and portable setups).
 pub const PATH_ENV: &str = "ILOM_KNOWN_CERTS";
@@ -28,19 +28,13 @@ pub struct KnownCerts {
 }
 
 impl KnownCerts {
-    /// Default location: `$ILOM_KNOWN_CERTS`, else
-    /// `$XDG_CONFIG_HOME/ilom-kvm/known_certs`, else
-    /// `~/.config/ilom-kvm/known_certs`.
+    /// Default location: `$ILOM_KNOWN_CERTS`, else `known_certs` in the
+    /// config directory ([`config::dir`]).
     pub fn default_path() -> Result<PathBuf> {
         if let Some(path) = std::env::var_os(PATH_ENV) {
             return Ok(path.into());
         }
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")))
-            .ok_or_else(|| anyhow!("cannot locate the config directory (HOME is not set)"))?;
-        Ok(config.join("ilom-kvm").join("known_certs"))
+        Ok(config::dir()?.join("known_certs"))
     }
 
     pub fn load_default() -> Result<Self> {

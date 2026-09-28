@@ -114,7 +114,7 @@ against. A client can refuse to connect or connect without verification.
   on port 443 presents the same certificate.
 - The web login happens before any JNLP exists, so on the first visit the
   port 443 certificate cannot be pinned. `ilom-kvm-rs` trusts it on first use
-  and stores its fingerprint (`~/.config/ilom-kvm/known_certs`). Later logins
+  and stores its fingerprint (`known_certs` in the user config directory). Later logins
   pin to the stored fingerprint and refuse a different certificate before the
   password is sent. It also compares the web fingerprint with the JNLP
   fingerprint; a mismatch only logs a warning, and the console channels are

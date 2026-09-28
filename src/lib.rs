@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod config;
 pub mod crypto;
 pub mod gui;
 pub mod hid;
