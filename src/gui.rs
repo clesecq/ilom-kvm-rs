@@ -16,7 +16,7 @@ use crate::{
     scsi::MediaKind,
     viewer::{
         ConnectionState, DecodedFrame, MediaStatus, Source, ViewerCommand, ViewerHandle,
-        spawn_viewer,
+        ViewerStatus, spawn_viewer,
     },
 };
 
@@ -249,6 +249,13 @@ impl HostAction {
     }
 }
 
+/// How the user asked to leave the console.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exit {
+    Disconnect,
+    Quit,
+}
+
 pub struct ViewerApp {
     handle: ViewerHandle,
     /// Host and username of a web login, to refill the form after a rejection.
@@ -266,6 +273,9 @@ pub struct ViewerApp {
     notice: Option<(String, Instant)>,
     capture_dir: PathBuf,
     disconnect_requested: bool,
+    /// Exit waiting for confirmation because images are still mounted.
+    pending_exit: Option<Exit>,
+    quit_confirmed: bool,
     /// Framebuffer widget holding keyboard focus in the last frame, if any.
     captured_by: Option<egui::Id>,
     /// Host key held down; `true` once it was used in a shortcut.
@@ -301,6 +311,8 @@ impl ViewerApp {
             notice: None,
             capture_dir,
             disconnect_requested: false,
+            pending_exit: None,
+            quit_confirmed: false,
             captured_by: None,
             host_key: None,
             floppy_writable: false,
@@ -335,6 +347,57 @@ impl ViewerApp {
             }
         }
         self.displayed_frame = Some(frame);
+    }
+
+    /// Leaves at once, or asks first when the host would lose mounted images.
+    fn request_exit(&mut self, ctx: &egui::Context, status: &ViewerStatus, exit: Exit) {
+        if mounted_images(status).is_empty() {
+            self.exit(ctx, exit);
+        } else {
+            self.pending_exit = Some(exit);
+        }
+    }
+
+    fn exit(&mut self, ctx: &egui::Context, exit: Exit) {
+        match exit {
+            Exit::Disconnect => self.disconnect_requested = true,
+            Exit::Quit => {
+                self.quit_confirmed = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    fn confirm_exit_dialog(&mut self, ctx: &egui::Context, status: &ViewerStatus) {
+        let Some(exit) = self.pending_exit else {
+            return;
+        };
+        let verb = match exit {
+            Exit::Disconnect => "Disconnect",
+            Exit::Quit => "Quit",
+        };
+        let mut confirmed = false;
+        let mut cancelled = false;
+        let modal = egui::Modal::new(egui::Id::new("confirm-exit")).show(ctx, |ui| {
+            ui.set_max_width(360.0);
+            ui.heading(format!("{verb} while media is mounted?"));
+            ui.add_space(6.0);
+            for image in mounted_images(status) {
+                ui.label(format!("• {image}"));
+            }
+            ui.label("The host loses these drives, which can break an installation in progress.");
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                confirmed = ui.button(verb).clicked();
+                cancelled = ui.button("Cancel").clicked();
+            });
+        });
+        if confirmed {
+            self.pending_exit = None;
+            self.exit(ctx, exit);
+        } else if cancelled || modal.should_close() {
+            self.pending_exit = None;
+        }
     }
 
     /// `(credentials, message)` once the session failed for good.
@@ -852,6 +915,11 @@ impl eframe::App for ViewerApp {
             .lock()
             .map(|status| status.clone())
             .unwrap_or_default();
+        if ctx.input(|input| input.viewport().close_requested()) && !self.quit_confirmed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.request_exit(&ctx, &status, Exit::Quit);
+        }
+        self.confirm_exit_dialog(&ctx, &status);
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             // Wrap whole widgets onto extra rows instead of truncating them
@@ -944,7 +1012,7 @@ impl eframe::App for ViewerApp {
                     self.toggle_fullscreen(&ctx);
                 }
                 if ui.button("Disconnect").clicked() {
-                    self.disconnect_requested = true;
+                    self.request_exit(&ctx, &status, Exit::Disconnect);
                 }
             });
             if let Some((notice, shown)) = &self.notice {
@@ -1058,6 +1126,20 @@ fn ctrl_alt_del() -> ViewerCommand {
         modifiers: USB_LEFT_CTRL | USB_LEFT_ALT,
         usage: USAGE_DELETE,
     }
+}
+
+/// "CD-ROM: name.iso" for each drive with an image.
+fn mounted_images(status: &ViewerStatus) -> Vec<String> {
+    [
+        (MediaKind::Cdrom, "CD-ROM"),
+        (MediaKind::Floppy, "Floppy/USB"),
+    ]
+    .into_iter()
+    .filter_map(|(kind, title)| {
+        let image = status.media(kind).image.as_ref()?;
+        Some(format!("{title}: {image}"))
+    })
+    .collect()
 }
 
 /// Host shown in the window title, so several open consoles stay apart.
