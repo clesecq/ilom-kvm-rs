@@ -10,10 +10,15 @@ use anyhow::{Result, anyhow};
 /// macOS and `%APPDATA%\ilom-kvm` on Windows. An existing `~/.config/ilom-kvm`
 /// (the only location used by 0.1.x) is kept on every Unix.
 /// Default screenshot folder: `ilom-kvm` in the user's Pictures folder, else
-/// in the home folder. Never relative to the working directory, which is `/`
-/// for apps started from the macOS Finder.
+/// in the home folder. On Linux that is the XDG pictures directory
+/// (`$XDG_PICTURES_DIR`, else its entry in `user-dirs.dirs`). Never relative
+/// to the working directory, which is `/` for apps started from the Finder.
 pub fn screenshot_dir() -> PathBuf {
-    dirs::picture_dir()
+    let from_env = std::env::var_os("XDG_PICTURES_DIR")
+        .filter(|value| cfg!(all(unix, not(target_os = "macos"))) && !value.is_empty())
+        .map(PathBuf::from);
+    from_env
+        .or_else(dirs::picture_dir)
         .or_else(dirs::home_dir)
         .map(|base| base.join("ilom-kvm"))
         .unwrap_or_else(|| PathBuf::from("captures"))

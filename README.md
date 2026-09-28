@@ -52,8 +52,10 @@ client's host key by default and never reaches the host. Pick another one
 `--host-key` or `ILOM_HOST_KEY`, or in the Keyboard menu (remembered). Tap it to capture or release the keyboard; hold it and press
 **F** for fullscreen, **V** to paste text or **Del** for Ctrl+Alt+Del. In
 fullscreen the toolbar hides; move the pointer to the top edge to show it.
-**Screenshot** saves PNG files to `ilom-kvm` in the Pictures folder
-(`--capture-dir` to change).
+**Screenshot** saves PNG files to an `ilom-kvm` folder in the Pictures
+folder: the XDG pictures directory on Linux (`XDG_PICTURES_DIR` or
+`user-dirs.dirs`, e.g. `~/Images` on a French desktop), `~/Pictures` on macOS
+and `%USERPROFILE%\Pictures` on Windows. `--capture-dir` changes it.
 
 The **100%** toggle shows host pixels 1:1 (scroll with the wheel or the
 scroll bars when the screen is larger than the window); otherwise the screen
