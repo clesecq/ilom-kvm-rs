@@ -18,6 +18,7 @@ use crate::{
 const USB_LEFT_CTRL: u8 = 0x01;
 const USB_LEFT_ALT: u8 = 0x04;
 const USAGE_DELETE: u8 = 0x4c;
+const APP_TITLE: &str = "ILOM Remote Console";
 
 pub struct IlomApp {
     viewer: Option<ViewerApp>,
@@ -160,6 +161,8 @@ impl eframe::App for IlomApp {
             eframe::App::ui(viewer, ui, frame);
             if viewer.disconnect_requested {
                 self.viewer = None;
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Title(APP_TITLE.into()));
             }
             return;
         }
@@ -187,6 +190,10 @@ pub struct ViewerApp {
 
 impl ViewerApp {
     pub fn new(context: &egui::Context, source: Source, capture_dir: PathBuf) -> Self {
+        context.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "{} — {APP_TITLE}",
+            source_host(&source)
+        )));
         let context = context.clone();
         let handle = spawn_viewer(source, move || context.request_repaint());
         Self {
@@ -674,6 +681,17 @@ impl Drop for ViewerApp {
     fn drop(&mut self) {
         self.release_input();
         self.handle.stop_and_wait();
+    }
+}
+
+/// Host shown in the window title, so several open consoles stay apart.
+fn source_host(source: &Source) -> String {
+    match source {
+        Source::Web { host, .. } => host.clone(),
+        Source::Jnlp(path) => source
+            .console_args()
+            .map(|args| args.host)
+            .unwrap_or_else(|_| path.display().to_string()),
     }
 }
 
