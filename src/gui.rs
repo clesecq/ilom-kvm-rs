@@ -11,6 +11,7 @@ use eframe::egui::{
 };
 
 use crate::{
+    clipboard::Clipboard,
     hid,
     keymap::{self, Layout},
     scsi::MediaKind,
@@ -408,8 +409,8 @@ pub struct ViewerApp {
     toolbar_overlay: Option<Rect>,
     notice: Option<(String, Instant)>,
     capture_dir: PathBuf,
-    /// Kept open so a copied screenshot stays available (see `copy_screenshot`).
-    clipboard: Option<arboard::Clipboard>,
+    /// Opened on the first frame, which gives the window's display handle.
+    clipboard: Option<Clipboard>,
     disconnect_requested: bool,
     /// Exit waiting for confirmation because images are still mounted.
     pending_exit: Option<Exit>,
@@ -856,7 +857,10 @@ impl ViewerApp {
 
     /// Types the clipboard text into the host using the selected layout.
     fn paste_clipboard(&mut self) {
-        let text = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            return;
+        };
+        let text = match clipboard.text() {
             Ok(text) => text,
             Err(error) => {
                 self.notify(format!("Clipboard unavailable: {error}"));
@@ -1126,22 +1130,10 @@ impl ViewerApp {
             self.notify("No frame is available yet");
             return;
         };
-        let image = arboard::ImageData {
-            width: frame.width as usize,
-            height: frame.height as usize,
-            bytes: std::borrow::Cow::Borrowed(&frame.rgba),
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            return;
         };
-        // On Linux the clipboard is served by this process: keep the
-        // `Clipboard` alive, or the copied image vanishes with it.
-        let clipboard = match self.clipboard.take() {
-            Some(clipboard) => Ok(clipboard),
-            None => arboard::Clipboard::new(),
-        };
-        let result = clipboard.and_then(|mut clipboard| {
-            let copied = clipboard.set_image(image);
-            self.clipboard = Some(clipboard);
-            copied
-        });
+        let result = clipboard.set_image(frame.width as usize, frame.height as usize, &frame.rgba);
         self.notify(match result {
             Ok(()) => format!("Screenshot copied ({}×{})", frame.width, frame.height),
             Err(error) => format!("Could not copy the screenshot: {error}"),
@@ -1488,8 +1480,13 @@ impl ViewerApp {
 }
 
 impl eframe::App for ViewerApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if self.clipboard.is_none() {
+            use raw_window_handle::HasDisplayHandle;
+            let display = frame.display_handle().ok().map(|handle| handle.as_raw());
+            self.clipboard = Some(Clipboard::new(display));
+        }
         self.refresh_texture(&ctx);
         let status = self
             .handle

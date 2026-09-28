@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod codec;
 pub mod config;
 pub mod crypto;
