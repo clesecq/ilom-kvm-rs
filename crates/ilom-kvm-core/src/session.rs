@@ -24,7 +24,7 @@ use crate::{
     scsi::{MediaImage, MediaKind},
     tls::{CertPolicy, FingerprintMismatch},
     tokend::Tokend,
-    video::{CursorUpdate, VideoEvent, VideoSession},
+    video::{self, CursorUpdate, VideoEvent, VideoSession},
     vmedia::{MediaChannel, MediaStats},
     web::{self, LoginRejected},
 };
@@ -120,6 +120,69 @@ impl HostCursor {
                 y_offset: update.y_offset,
                 pattern,
             },
+        })
+    }
+}
+
+/// Host cursor clipped to a frame, as straight (not premultiplied) RGBA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorImage {
+    /// Top-left corner in frame pixels.
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+impl HostCursor {
+    /// Clips the 64×64 hardware cursor pattern to `frame` and turns it into
+    /// RGBA. XOR pixels invert the frame below, as on the host.
+    pub fn render(&self, frame: &DecodedFrame) -> Option<CursorImage> {
+        const SIZE: usize = video::CURSOR_SIZE;
+        let x_offset = self.x_offset.clamp(0, SIZE as i16 - 1) as usize;
+        let y_offset = self.y_offset.clamp(0, SIZE as i16 - 1) as usize;
+        let x = self.x.max(0) as usize;
+        // The vendor client treats rows past 1200 as a wrapped negative value.
+        let y = if self.y > 1200 {
+            0
+        } else {
+            self.y.max(0) as usize
+        };
+        let (frame_width, frame_height) = (frame.width as usize, frame.height as usize);
+        let width = (SIZE - x_offset).min(frame_width.saturating_sub(x));
+        let height = (SIZE - y_offset).min(frame_height.saturating_sub(y));
+        if width == 0 || height == 0 || self.pattern.len() < SIZE * SIZE {
+            return None;
+        }
+        let nibble = |value: u16, shift: u32| ((value >> shift) & 0xf) as u8 * 17;
+        let mut rgba = vec![0_u8; width * height * 4];
+        for row in 0..height {
+            for column in 0..width {
+                let pixel = self.pattern[(row + y_offset) * SIZE + column + x_offset];
+                let color = [nibble(pixel, 8), nibble(pixel, 4), nibble(pixel, 0)];
+                let out = &mut rgba[(row * width + column) * 4..][..4];
+                if self.alpha {
+                    out[..3].copy_from_slice(&color);
+                    out[3] = nibble(pixel, 12);
+                } else if pixel & 0x8000 == 0 {
+                    out[..3].copy_from_slice(&color);
+                    out[3] = 255;
+                } else if pixel & 0x4000 != 0 {
+                    let below = &frame.rgba[((y + row) * frame_width + x + column) * 4..][..3];
+                    for (channel, value) in out.iter_mut().zip(below) {
+                        *channel = 255 - value;
+                    }
+                    out[3] = 255;
+                }
+            }
+        }
+        Some(CursorImage {
+            x: x as u32,
+            y: y as u32,
+            width: width as u32,
+            height: height as u32,
+            rgba,
         })
     }
 }
@@ -873,5 +936,41 @@ impl Media {
             media.active = false;
             media.error = Some(message);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_pixels_follow_and_xor_rules() {
+        let mut pattern = vec![0x8000_u16; 64 * 64]; // AND 1, XOR 0: transparent
+        pattern[0] = 0x0f00; // AND 0: opaque red
+        pattern[1] = 0xc000; // AND 1, XOR 1: invert
+        let cursor = HostCursor {
+            serial: 1,
+            alpha: false,
+            x: 98,
+            y: 0,
+            x_offset: 0,
+            y_offset: 0,
+            pattern: Arc::new(pattern),
+        };
+        let frame = DecodedFrame {
+            width: 100,
+            height: 80,
+            sequence: 1,
+            rgba: vec![10; 100 * 80 * 4],
+        };
+        let image = cursor.render(&frame).unwrap();
+        // Clipped at the right edge: only two columns fit.
+        assert_eq!(
+            (image.x, image.y, image.width, image.height),
+            (98, 0, 2, 64)
+        );
+        assert_eq!(image.rgba[..4], [255, 0, 0, 255]);
+        assert_eq!(image.rgba[4..8], [245, 245, 245, 255]);
+        assert_eq!(image.rgba[8..12], [0, 0, 0, 0]);
     }
 }

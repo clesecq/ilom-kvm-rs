@@ -15,10 +15,9 @@ use ilom_kvm_core::{
     keymap::{self, Layout},
     scsi::MediaKind,
     session::{
-        ConnectionState, DecodedFrame, HostCursor, MediaStatus, Source, ViewerCommand,
-        ViewerHandle, ViewerStatus, spawn_viewer,
+        ConnectionState, DecodedFrame, MediaStatus, Source, ViewerCommand, ViewerHandle,
+        ViewerStatus, spawn_viewer,
     },
-    video,
 };
 
 use crate::{clipboard::Clipboard, settings::Settings};
@@ -1428,8 +1427,14 @@ impl ViewerApp {
             .as_ref()
             .is_none_or(|(cached, ..)| *cached != key)
         {
-            self.cursor_texture = render_cursor(&cursor, &frame).map(|(image, host_rect)| {
-                let texture = ctx.load_texture("host cursor", image, self.texture_options);
+            self.cursor_texture = cursor.render(&frame).map(|image| {
+                let size = [image.width as usize, image.height as usize];
+                let pixels = ColorImage::from_rgba_unmultiplied(size, &image.rgba);
+                let texture = ctx.load_texture("host cursor", pixels, self.texture_options);
+                let host_rect = Rect::from_min_size(
+                    Pos2::new(image.x as f32, image.y as f32),
+                    Vec2::new(image.width as f32, image.height as f32),
+                );
                 (key, texture, host_rect)
             });
         }
@@ -1585,55 +1590,6 @@ fn ctrl_alt_del() -> ViewerCommand {
         modifiers: USB_LEFT_CTRL | USB_LEFT_ALT,
         usage: USAGE_DELETE,
     }
-}
-
-/// Clips the 64×64 hardware cursor pattern to the framebuffer and turns it
-/// into RGBA. XOR pixels invert the framebuffer below, as on the host.
-fn render_cursor(cursor: &HostCursor, frame: &DecodedFrame) -> Option<(ColorImage, Rect)> {
-    const SIZE: usize = video::CURSOR_SIZE;
-    let x_offset = cursor.x_offset.clamp(0, SIZE as i16 - 1) as usize;
-    let y_offset = cursor.y_offset.clamp(0, SIZE as i16 - 1) as usize;
-    let x = cursor.x.max(0) as usize;
-    // The vendor client treats rows past 1200 as a wrapped negative value.
-    let y = if cursor.y > 1200 {
-        0
-    } else {
-        cursor.y.max(0) as usize
-    };
-    let (frame_width, frame_height) = (frame.width as usize, frame.height as usize);
-    let width = (SIZE - x_offset).min(frame_width.saturating_sub(x));
-    let height = (SIZE - y_offset).min(frame_height.saturating_sub(y));
-    if width == 0 || height == 0 || cursor.pattern.len() < SIZE * SIZE {
-        return None;
-    }
-    let nibble = |value: u16, shift: u32| ((value >> shift) & 0xf) as u8 * 17;
-    let mut rgba = vec![0_u8; width * height * 4];
-    for row in 0..height {
-        for column in 0..width {
-            let pixel = cursor.pattern[(row + y_offset) * SIZE + column + x_offset];
-            let color = [nibble(pixel, 8), nibble(pixel, 4), nibble(pixel, 0)];
-            let out = &mut rgba[(row * width + column) * 4..][..4];
-            if cursor.alpha {
-                out[..3].copy_from_slice(&color);
-                out[3] = nibble(pixel, 12);
-            } else if pixel & 0x8000 == 0 {
-                out[..3].copy_from_slice(&color);
-                out[3] = 255;
-            } else if pixel & 0x4000 != 0 {
-                let below = &frame.rgba[((y + row) * frame_width + x + column) * 4..][..3];
-                for (channel, value) in out.iter_mut().zip(below) {
-                    *channel = 255 - value;
-                }
-                out[3] = 255;
-            }
-        }
-    }
-    let image = ColorImage::from_rgba_unmultiplied([width, height], &rgba);
-    let host_rect = Rect::from_min_size(
-        Pos2::new(x as f32, y as f32),
-        Vec2::new(width as f32, height as f32),
-    );
-    Some((image, host_rect))
 }
 
 /// Virtual drive for an image file, from its extension.
@@ -1820,35 +1776,6 @@ mod tests {
         assert_eq!(key_to_usage(Key::Enter), Some(0x28));
         assert_eq!(key_to_usage(Key::F12), Some(0x45));
         assert_eq!(key_to_usage(Key::ArrowUp), Some(0x52));
-    }
-
-    #[test]
-    fn cursor_pixels_follow_and_xor_rules() {
-        let mut pattern = vec![0x8000_u16; 64 * 64]; // AND 1, XOR 0: transparent
-        pattern[0] = 0x0f00; // AND 0: opaque red
-        pattern[1] = 0xc000; // AND 1, XOR 1: invert
-        let cursor = HostCursor {
-            serial: 1,
-            alpha: false,
-            x: 98,
-            y: 0,
-            x_offset: 0,
-            y_offset: 0,
-            pattern: Arc::new(pattern),
-        };
-        let frame = DecodedFrame {
-            width: 100,
-            height: 80,
-            sequence: 1,
-            rgba: vec![10; 100 * 80 * 4],
-        };
-        let (image, host_rect) = render_cursor(&cursor, &frame).unwrap();
-        // Clipped at the right edge: only two columns fit.
-        assert_eq!(image.size, [2, 64]);
-        assert_eq!(host_rect.min, Pos2::new(98.0, 0.0));
-        assert_eq!(image.pixels[0], Color32::from_rgb(255, 0, 0));
-        assert_eq!(image.pixels[1], Color32::from_rgb(245, 245, 245));
-        assert_eq!(image.pixels[2], Color32::TRANSPARENT);
     }
 
     #[test]
