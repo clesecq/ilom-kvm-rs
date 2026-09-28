@@ -190,7 +190,22 @@ impl eframe::App for IlomApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if let Some(viewer) = self.viewer.as_mut() {
             eframe::App::ui(viewer, ui, frame);
-            if viewer.disconnect_requested {
+            let rejected = viewer.rejection();
+            let login = viewer.login.clone();
+            if viewer.disconnect_requested || rejected.is_some() {
+                // A rejected session goes back to the form instead of retrying.
+                if let Some((credentials, message)) = rejected {
+                    if let Some((host, username)) = login {
+                        self.host = host;
+                        self.username = username;
+                    }
+                    self.form_error = Some(if credentials {
+                        self.password.clear();
+                        format!("Login rejected; check the username and password ({message})")
+                    } else {
+                        message
+                    });
+                }
                 self.viewer = None;
                 let ctx = ui.ctx();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(APP_TITLE.into()));
@@ -236,6 +251,8 @@ impl HostAction {
 
 pub struct ViewerApp {
     handle: ViewerHandle,
+    /// Host and username of a web login, to refill the form after a rejection.
+    login: Option<(String, String)>,
     layout: Layout,
     texture: Option<TextureHandle>,
     displayed_frame: Option<Arc<DecodedFrame>>,
@@ -263,10 +280,15 @@ impl ViewerApp {
             "{} — {APP_TITLE}",
             source_host(&source)
         )));
+        let login = match &source {
+            Source::Web { host, username, .. } => Some((host.clone(), username.clone())),
+            Source::Jnlp(_) => None,
+        };
         let context = context.clone();
         let handle = spawn_viewer(source, move || context.request_repaint());
         Self {
             handle,
+            login,
             layout: Layout::from_locale(),
             texture: None,
             displayed_frame: None,
@@ -313,6 +335,17 @@ impl ViewerApp {
             }
         }
         self.displayed_frame = Some(frame);
+    }
+
+    /// `(credentials, message)` once the session failed for good.
+    fn rejection(&self) -> Option<(bool, String)> {
+        let status = self.handle.shared.status.lock().ok()?;
+        match status.state {
+            ConnectionState::Rejected { credentials } => {
+                Some((credentials, status.message.clone()))
+            }
+            _ => None,
+        }
     }
 
     fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
@@ -827,7 +860,9 @@ impl eframe::App for ViewerApp {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 let color = match status.state {
                     ConnectionState::Connected => Color32::from_rgb(80, 200, 120),
-                    ConnectionState::Error => Color32::from_rgb(235, 90, 90),
+                    ConnectionState::Error | ConnectionState::Rejected { .. } => {
+                        Color32::from_rgb(235, 90, 90)
+                    }
                     _ => Color32::from_rgb(235, 185, 70),
                 };
                 ui.colored_label(color, format!("● {}", status.message));

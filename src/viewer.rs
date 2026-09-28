@@ -22,11 +22,11 @@ use crate::{
     jnlp::{self, ConsoleArgs},
     keymap,
     scsi::{MediaImage, MediaKind},
-    tls::CertPolicy,
+    tls::{CertPolicy, FingerprintMismatch},
     tokend::Tokend,
     video::{VideoEvent, VideoSession},
     vmedia::{MediaChannel, MediaStats},
-    web,
+    web::{self, LoginRejected},
 };
 
 /// Where launch parameters come from.
@@ -87,6 +87,10 @@ pub enum ConnectionState {
     Connected,
     Reconnecting,
     Error,
+    /// Retrying cannot help: bad credentials or a changed certificate.
+    Rejected {
+        credentials: bool,
+    },
     Stopped,
 }
 
@@ -303,6 +307,13 @@ fn run(
             Err(error) => format!("{error:#}"),
         };
         warn!(%message, "session ended");
+        if let Some(credentials) = result.as_ref().err().and_then(rejection) {
+            set_status(&shared, &repaint, |status| {
+                status.state = ConnectionState::Rejected { credentials };
+                status.message = message;
+            });
+            break;
+        }
         if !source.can_reconnect() {
             set_status(&shared, &repaint, |status| {
                 status.state = ConnectionState::Error;
@@ -337,12 +348,26 @@ fn run(
         }
     }
     set_status(&shared, &repaint, |status| {
-        if status.state != ConnectionState::Error {
+        if !matches!(
+            status.state,
+            ConnectionState::Error | ConnectionState::Rejected { .. }
+        ) {
             status.state = ConnectionState::Stopped;
             status.message = "Disconnected".into();
         }
     });
     let _ = input_thread.join();
+}
+
+/// `Some(credentials)` when the error is final and must not be retried.
+fn rejection(error: &anyhow::Error) -> Option<bool> {
+    if error.chain().any(|cause| cause.is::<LoginRejected>()) {
+        Some(true)
+    } else if error.chain().any(|cause| cause.is::<FingerprintMismatch>()) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn session(

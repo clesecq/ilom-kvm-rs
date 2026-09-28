@@ -80,7 +80,11 @@ impl WebSession {
                 .nth(1)
                 .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
                 .unwrap_or("?");
-            bail!("ILOM web login failed for {username} (msg={code})");
+            return Err(LoginRejected {
+                username: username.to_string(),
+                code: code.to_string(),
+            }
+            .into());
         };
         info!(host, username, "ILOM web login succeeded");
         Ok(Self {
@@ -141,6 +145,15 @@ impl WebSession {
         debug!("ILOM web session closed");
         Ok(())
     }
+}
+
+/// The ILOM refused the username or password. Retrying would only count
+/// more failed logins against the account.
+#[derive(Debug, thiserror::Error)]
+#[error("ILOM web login failed for {username} (msg={code})")]
+pub struct LoginRejected {
+    pub username: String,
+    pub code: String,
 }
 
 /// Logs in, mints a JNLP and logs out again (ILOM has few web slots).
