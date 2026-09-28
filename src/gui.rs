@@ -1225,11 +1225,13 @@ impl eframe::App for ViewerApp {
                     Some(HostAction::ToggleCapture) if focused => {
                         ui.memory_mut(|memory| memory.surrender_focus(response.id));
                     }
-                    Some(HostAction::ToggleCapture) => response.request_focus(),
+                    Some(HostAction::ToggleCapture) if self.pending_exit.is_none() => {
+                        response.request_focus();
+                    }
                     Some(HostAction::Fullscreen) => self.toggle_fullscreen(&ctx),
                     Some(HostAction::Paste) => self.paste_clipboard(),
                     Some(HostAction::CtrlAltDel) => self.send(ctrl_alt_del()),
-                    None => {}
+                    Some(HostAction::ToggleCapture) | None => {}
                 }
                 let absolute = status.absolute_mouse;
                 // Without a host key a locked cursor could never be released.
