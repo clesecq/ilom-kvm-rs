@@ -504,7 +504,10 @@ impl eframe::App for ViewerApp {
             .unwrap_or_default();
 
         egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
+            // Wrap whole widgets onto extra rows instead of truncating them
+            // when the window is too narrow.
+            ui.horizontal_wrapped(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 let color = match status.state {
                     ConnectionState::Connected => Color32::from_rgb(80, 200, 120),
                     ConnectionState::Error => Color32::from_rgb(235, 90, 90),
