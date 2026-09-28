@@ -683,6 +683,17 @@ impl eframe::App for ViewerApp {
                     _ => Color32::from_rgb(235, 185, 70),
                 };
                 ui.colored_label(color, format!("● {}", status.message));
+                if status.state == ConnectionState::Reconnecting
+                    && ui
+                        .small_button("Reconnect now")
+                        .on_hover_text("Skip the wait before the next attempt")
+                        .clicked()
+                {
+                    self.handle
+                        .shared
+                        .reconnect_now
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 if let Some(frame) = &self.displayed_frame {
                     ui.separator();
                     ui.label(format!("{}×{}", frame.width, frame.height));
@@ -763,7 +774,11 @@ impl eframe::App for ViewerApp {
                 let (Some(texture), Some(frame)) = (&self.texture, &self.displayed_frame) else {
                     ui.centered_and_justified(|ui| {
                         ui.spinner();
-                        ui.label("Waiting for the first frame…");
+                        ui.label(if status.state == ConnectionState::Connected {
+                            "Waiting for the first frame…"
+                        } else {
+                            status.message.as_str()
+                        });
                     });
                     return;
                 };
@@ -776,6 +791,19 @@ impl eframe::App for ViewerApp {
                     rect,
                     egui::Image::new((texture.id(), size)).sense(Sense::click_and_drag()),
                 );
+                if status.state != ConnectionState::Connected {
+                    // Dim the last frame so a stale screen is not mistaken for a live one.
+                    ui.painter()
+                        .rect_filled(rect, 0, Color32::from_black_alpha(170));
+                    let galley = ui.painter().layout(
+                        status.message.clone(),
+                        egui::FontId::proportional(18.0),
+                        Color32::WHITE,
+                        (rect.width() - 32.0).max(80.0),
+                    );
+                    let origin = rect.center() - galley.size() / 2.0;
+                    ui.painter().galley(origin, galley, Color32::WHITE);
+                }
                 if response.clicked() || response.drag_started() {
                     response.request_focus();
                 }

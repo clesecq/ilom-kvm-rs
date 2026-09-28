@@ -51,6 +51,11 @@ Ctrl+Alt+Del, Ctrl+Alt+F1…F12, Alt+Tab, Super, Print Screen and Magic SysRq.
 The **Keyboard** menu pastes clipboard text (typed with the chosen host
 layout) and toggles the host lock keys.
 
+When the SP or network drops, the viewer dims the last frame and reconnects
+by itself (keep-alive notices a dead link in about 30 s). Attempts back off
+from 5 s to 30 s; **Reconnect now** skips the wait. Only logins from the form
+or `--auto` can reconnect: a downloaded JNLP works for one connection.
+
 The **CD-ROM…** and **Floppy/USB…** toolbar menus redirect an ISO image or a
 raw disk image to the host's virtual drives. Floppy images are read-only
 unless "Allow the host to write" is ticked before mounting. Mounted images
