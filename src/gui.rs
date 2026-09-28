@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use eframe::egui::{
     self, Color32, ColorImage, Event, Key, PointerButton, Pos2, Rect, Sense, TextureHandle,
@@ -19,6 +24,8 @@ const USB_LEFT_CTRL: u8 = 0x01;
 const USB_LEFT_ALT: u8 = 0x04;
 const USAGE_DELETE: u8 = 0x4c;
 const APP_TITLE: &str = "ILOM Remote Console";
+/// How long a toolbar notice stays visible.
+const NOTICE_TIMEOUT: Duration = Duration::from_secs(6);
 
 pub struct IlomApp {
     viewer: Option<ViewerApp>,
@@ -181,7 +188,7 @@ pub struct ViewerApp {
     modifiers: u8,
     mouse_buttons: u8,
     fullscreen: bool,
-    notice: Option<String>,
+    notice: Option<(String, Instant)>,
     capture_dir: PathBuf,
     disconnect_requested: bool,
     /// Let the host write to the next floppy image mounted.
@@ -240,6 +247,10 @@ impl ViewerApp {
             }
         }
         self.displayed_frame = Some(frame);
+    }
+
+    fn notify(&mut self, text: impl Into<String>) {
+        self.notice = Some((text.into(), Instant::now()));
     }
 
     fn send(&self, command: ViewerCommand) {
@@ -371,13 +382,13 @@ impl ViewerApp {
         let text = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
             Ok(text) => text,
             Err(error) => {
-                self.notice = Some(format!("Clipboard unavailable: {error}"));
+                self.notify(format!("Clipboard unavailable: {error}"));
                 return;
             }
         };
         const MAX_PASTE: usize = 10_000;
         if text.chars().count() > MAX_PASTE {
-            self.notice = Some(format!(
+            self.notify(format!(
                 "Clipboard text is longer than {MAX_PASTE} characters"
             ));
             return;
@@ -395,7 +406,7 @@ impl ViewerApp {
                 skipped.len()
             ));
         }
-        self.notice = Some(notice);
+        self.notify(notice);
         self.send(ViewerCommand::TypeStrokes(strokes));
     }
 
@@ -472,7 +483,7 @@ impl ViewerApp {
 
     fn save_screenshot(&mut self) {
         let Some(frame) = self.displayed_frame.as_ref() else {
-            self.notice = Some("No frame is available yet".into());
+            self.notify("No frame is available yet");
             return;
         };
         let result = (|| -> anyhow::Result<PathBuf> {
@@ -491,7 +502,7 @@ impl ViewerApp {
             )?;
             Ok(path)
         })();
-        self.notice = Some(match result {
+        self.notify(match result {
             Ok(path) => format!("Screenshot saved: {}", path.display()),
             Err(error) => format!("Screenshot failed: {error:#}"),
         });
@@ -622,8 +633,14 @@ impl eframe::App for ViewerApp {
                     self.disconnect_requested = true;
                 }
             });
-            if let Some(notice) = &self.notice {
-                ui.small(notice);
+            if let Some((notice, shown)) = &self.notice {
+                match NOTICE_TIMEOUT.checked_sub(shown.elapsed()) {
+                    Some(remaining) => {
+                        ui.small(notice);
+                        ctx.request_repaint_after(remaining);
+                    }
+                    None => self.notice = None,
+                }
             }
         });
 
