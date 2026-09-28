@@ -59,12 +59,21 @@ pub struct IlomApp {
     username: String,
     password: String,
     capture_dir: PathBuf,
-    host_key: HostKey,
-    layout: Layout,
+    prefs: ViewerPrefs,
     /// Remembered choices, rewritten when the user changes one in the GUI.
     settings: Settings,
     settings_path: Option<PathBuf>,
     form_error: Option<String>,
+}
+
+/// Viewer choices the user can change in the menus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewerPrefs {
+    pub host_key: HostKey,
+    /// Keyboard layout configured on the host, used for pasting.
+    pub layout: Layout,
+    /// Show host pixels 1:1 instead of fitting the window.
+    pub actual_size: bool,
 }
 
 /// Values the GUI starts with, already merged from options and settings.
@@ -73,8 +82,7 @@ pub struct Startup {
     pub username: String,
     pub password: Option<String>,
     pub capture_dir: PathBuf,
-    pub host_key: HostKey,
-    pub layout: Layout,
+    pub prefs: ViewerPrefs,
     pub settings: Settings,
     pub settings_path: Option<PathBuf>,
 }
@@ -82,13 +90,7 @@ pub struct Startup {
 impl IlomApp {
     pub fn new(startup: Startup, initial: Option<Source>, context: &egui::Context) -> Self {
         let viewer = initial.map(|source| {
-            ViewerApp::new(
-                context,
-                source,
-                startup.capture_dir.clone(),
-                startup.host_key,
-                startup.layout,
-            )
+            ViewerApp::new(context, source, startup.capture_dir.clone(), startup.prefs)
         });
         Self {
             viewer,
@@ -96,8 +98,7 @@ impl IlomApp {
             username: startup.username,
             password: startup.password.unwrap_or_default(),
             capture_dir: startup.capture_dir,
-            host_key: startup.host_key,
-            layout: startup.layout,
+            prefs: startup.prefs,
             settings: startup.settings,
             settings_path: startup.settings_path,
             form_error: None,
@@ -113,16 +114,16 @@ impl IlomApp {
         }
     }
 
-    /// Remembers host key and layout changes made in the viewer menus.
-    fn remember_viewer_choices(&mut self, host_key: HostKey, layout: Layout) {
-        if host_key == self.host_key && layout == self.layout {
+    /// Remembers choices made in the viewer menus.
+    fn remember_viewer_choices(&mut self, prefs: ViewerPrefs) {
+        if prefs == self.prefs {
             return;
         }
-        self.host_key = host_key;
-        self.layout = layout;
-        self.settings.host_key =
-            clap::ValueEnum::to_possible_value(&host_key).map(|value| value.get_name().to_owned());
-        self.settings.layout = Some(layout.id().to_owned());
+        self.prefs = prefs;
+        self.settings.host_key = clap::ValueEnum::to_possible_value(&prefs.host_key)
+            .map(|value| value.get_name().to_owned());
+        self.settings.layout = Some(prefs.layout.id().to_owned());
+        self.settings.actual_size = Some(prefs.actual_size);
         self.save_settings();
     }
 
@@ -241,11 +242,11 @@ impl eframe::App for IlomApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if let Some(viewer) = self.viewer.as_mut() {
             eframe::App::ui(viewer, ui, frame);
-            let (host_key, layout) = (viewer.host_key_choice, viewer.layout);
+            let prefs = viewer.prefs;
             let rejected = viewer.rejection();
             let login = viewer.login.clone();
             let leaving = viewer.disconnect_requested || rejected.is_some();
-            self.remember_viewer_choices(host_key, layout);
+            self.remember_viewer_choices(prefs);
             if leaving {
                 // A rejected session goes back to the form instead of retrying.
                 if let Some((credentials, message)) = rejected {
@@ -275,8 +276,7 @@ impl eframe::App for IlomApp {
                 ui.ctx(),
                 source,
                 self.capture_dir.clone(),
-                self.host_key,
-                self.layout,
+                self.prefs,
             ));
         }
     }
@@ -382,14 +382,13 @@ pub struct ViewerApp {
     handle: ViewerHandle,
     /// Host and username of a web login, to refill the form after a rejection.
     login: Option<(String, String)>,
-    pub layout: Layout,
+    /// Choices made in the menus, remembered between runs.
+    pub prefs: ViewerPrefs,
     texture: Option<TextureHandle>,
     texture_options: TextureOptions,
     /// Host cursor image, keyed by cursor serial, frame and filter, with its
     /// place in host pixels.
     cursor_texture: Option<((u64, u64, TextureOptions), TextureHandle, Rect)>,
-    /// Show host pixels 1:1 instead of fitting the window.
-    actual_size: bool,
     displayed_frame: Option<Arc<DecodedFrame>>,
     pressed_usages: BTreeSet<u8>,
     modifiers: u8,
@@ -409,7 +408,6 @@ pub struct ViewerApp {
     captured_by: Option<egui::Id>,
     /// Host key held down; `true` once it was used in a shortcut.
     host_key: Option<bool>,
-    pub host_key_choice: HostKey,
     /// Let the host write to the next floppy image mounted.
     floppy_writable: bool,
 }
@@ -419,8 +417,7 @@ impl ViewerApp {
         context: &egui::Context,
         source: Source,
         capture_dir: PathBuf,
-        host_key_choice: HostKey,
-        layout: Layout,
+        prefs: ViewerPrefs,
     ) -> Self {
         context.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "{} — {APP_TITLE}",
@@ -435,11 +432,10 @@ impl ViewerApp {
         Self {
             handle,
             login,
-            layout,
+            prefs,
             texture: None,
             texture_options: TextureOptions::LINEAR,
             cursor_texture: None,
-            actual_size: false,
             displayed_frame: None,
             pressed_usages: BTreeSet::new(),
             modifiers: 0,
@@ -454,7 +450,6 @@ impl ViewerApp {
             quit_confirmed: false,
             captured_by: None,
             host_key: None,
-            host_key_choice,
             floppy_writable: false,
         }
     }
@@ -620,7 +615,7 @@ impl ViewerApp {
             // USB usages name physical positions; the host applies its
             // own layout, so prefer the physical key when available.
             let key = physical_key.unwrap_or(key);
-            if Some(key) == self.host_key_choice.key() {
+            if Some(key) == self.prefs.host_key.key() {
                 if pressed {
                     if !repeat {
                         self.host_key = Some(false);
@@ -809,11 +804,11 @@ impl ViewerApp {
             ));
             return;
         }
-        let (strokes, skipped) = keymap::text_to_strokes(self.layout, &text);
+        let (strokes, skipped) = keymap::text_to_strokes(self.prefs.layout, &text);
         let mut notice = format!(
             "Typing {} characters ({})",
             strokes.len(),
-            self.layout.label()
+            self.prefs.layout.label()
         );
         if !skipped.is_empty() {
             let sample: String = skipped.iter().take(10).collect();
@@ -932,16 +927,16 @@ impl ViewerApp {
             {
                 self.paste_clipboard();
             }
-            ui.menu_button(format!("Host layout: {}", self.layout.label()), |ui| {
+            ui.menu_button(format!("Host layout: {}", self.prefs.layout.label()), |ui| {
                 for layout in Layout::ALL {
-                    ui.selectable_value(&mut self.layout, layout, layout.label());
+                    ui.selectable_value(&mut self.prefs.layout, layout, layout.label());
                 }
             })
             .response
             .on_hover_text("Keyboard layout configured on the host (used for pasting)");
-            ui.menu_button(format!("Host key: {}", self.host_key_choice.label()), |ui| {
+            ui.menu_button(format!("Host key: {}", self.prefs.host_key.label()), |ui| {
                 for choice in HostKey::ALL {
-                    ui.selectable_value(&mut self.host_key_choice, choice, choice.label());
+                    ui.selectable_value(&mut self.prefs.host_key, choice, choice.label());
                 }
             })
             .response
@@ -1107,7 +1102,7 @@ impl ViewerApp {
             if !status.keyboard {
                 ui.weak("Keyboard/mouse off");
             } else if let Some(id) = self.captured_by {
-                let host_key = self.host_key_choice;
+                let host_key = self.prefs.host_key;
                 let text = if self.cursor_grabbed {
                     // The locked cursor cannot reach the Release button.
                     format!(
@@ -1127,7 +1122,7 @@ impl ViewerApp {
                     ui.memory_mut(|memory| memory.surrender_focus(id));
                 }
             } else {
-                let host_key = self.host_key_choice;
+                let host_key = self.prefs.host_key;
                 let text = match host_key {
                     HostKey::None => "Click the screen to capture the keyboard".into(),
                     _ => format!(
@@ -1161,7 +1156,7 @@ impl ViewerApp {
                 self.media_menu(ui, kind, status.media(kind));
             }
             ui.separator();
-            ui.toggle_value(&mut self.actual_size, "100%")
+            ui.toggle_value(&mut self.prefs.actual_size, "100%")
                 .on_hover_text(
                     "Show host pixels 1:1 and scroll when larger than the window; \
                  off fits the screen to the window",
@@ -1263,7 +1258,7 @@ impl ViewerApp {
         }
         let absolute = status.absolute_mouse;
         // Without a host key a locked cursor could never be released.
-        let grab = focused && status.keyboard && !absolute && self.host_key_choice.key().is_some();
+        let grab = focused && status.keyboard && !absolute && self.prefs.host_key.key().is_some();
         self.set_cursor_grab(ctx, grab);
         if focused
             && absolute
@@ -1412,7 +1407,7 @@ impl eframe::App for ViewerApp {
                 };
                 let texture_id = texture.id();
                 let frame_size = Vec2::new(frame.width as f32, frame.height as f32);
-                if self.actual_size {
+                if self.prefs.actual_size {
                     // One host pixel per screen pixel; scroll when it does not fit.
                     let size = frame_size / ctx.pixels_per_point();
                     egui::ScrollArea::both()

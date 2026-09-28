@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use ilom_kvm::{
     codec::AspeedCodec,
     config,
-    gui::{HostKey, IlomApp, Startup},
+    gui::{HostKey, IlomApp, Startup, ViewerPrefs},
     hid::HidSession,
     jnlp::{self, ConsoleArgs},
     keymap::Layout,
@@ -207,8 +207,11 @@ fn viewer(args: ViewerArgs) -> Result<()> {
         username,
         password,
         capture_dir: args.capture_dir.unwrap_or_else(config::screenshot_dir),
-        host_key,
-        layout,
+        prefs: ViewerPrefs {
+            host_key,
+            layout,
+            actual_size: settings.actual_size.unwrap_or(false),
+        },
         settings,
         settings_path,
     };

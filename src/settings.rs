@@ -20,6 +20,8 @@ pub struct Settings {
     pub host_key: Option<String>,
     /// Host keyboard layout id, e.g. `fr`.
     pub layout: Option<String>,
+    /// `true` for the 1:1 view, `false` to fit the window.
+    pub actual_size: Option<bool>,
 }
 
 impl Settings {
@@ -55,6 +57,13 @@ impl Settings {
                 "username" => settings.username = value,
                 "host_key" => settings.host_key = value,
                 "layout" => settings.layout = value,
+                "scale" => {
+                    settings.actual_size = match value.as_deref() {
+                        Some("100%") => Some(true),
+                        Some("fit") => Some(false),
+                        _ => None,
+                    }
+                }
                 _ => {}
             }
         }
@@ -73,6 +82,10 @@ impl Settings {
             if let Some(value) = value.as_deref().filter(|value| !value.contains('\n')) {
                 text.push_str(&format!("{key} = {value}\n"));
             }
+        }
+        if let Some(actual_size) = self.actual_size {
+            let scale = if actual_size { "100%" } else { "fit" };
+            text.push_str(&format!("scale = {scale}\n"));
         }
         text
     }
@@ -100,6 +113,7 @@ mod tests {
             username: Some("root".into()),
             host_key: Some("menu".into()),
             layout: None,
+            actual_size: Some(true),
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
         let parsed = Settings::parse("# comment\nfuture = 1\nlayout = fr\nhost =\n");

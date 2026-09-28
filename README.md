@@ -96,7 +96,8 @@ Files live in the config directory: `~/.config/ilom-kvm` on Linux,
 `~/.config/ilom-kvm` is kept) and `%APPDATA%\ilom-kvm` on Windows.
 `XDG_CONFIG_HOME` overrides it everywhere.
 
-The GUI remembers the last host, username, host key and host layout in
+The GUI remembers the last host, username, host key, host layout and view
+(fit or 100%) in
 `settings` (override with `ILOM_SETTINGS`); the password is never stored.
 Command-line options and environment variables win over saved values.
 
