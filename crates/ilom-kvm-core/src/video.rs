@@ -259,8 +259,10 @@ impl CursorUpdate {
             .get(..pattern_bytes)
             .map(|bytes| {
                 bytes
-                    .chunks_exact(2)
-                    .map(|pixel| u16::from_le_bytes([pixel[0], pixel[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&pixel| u16::from_le_bytes(pixel))
                     .collect()
             });
         Some(Self {

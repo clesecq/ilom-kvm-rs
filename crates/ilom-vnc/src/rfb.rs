@@ -153,7 +153,7 @@ impl PixelFormat {
         }
         let len = self.bytes_per_pixel();
         out.reserve(rgba.len() / 4 * len);
-        for pixel in rgba.chunks_exact(4) {
+        for pixel in rgba.as_chunks::<4>().0 {
             self.write_pixel(self.pixel(pixel), len, out);
         }
     }
@@ -221,8 +221,10 @@ pub fn read_client_message(reader: &mut impl Read) -> Result<ClientMessage> {
             let mut list = vec![0_u8; count * 4];
             reader.read_exact(&mut list)?;
             ClientMessage::SetEncodings(
-                list.chunks_exact(4)
-                    .map(|bytes| i32::from_be_bytes(bytes.try_into().unwrap()))
+                list.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&bytes| i32::from_be_bytes(bytes))
                     .collect(),
             )
         }
@@ -383,7 +385,9 @@ impl Zrle {
                     let start = (row * width + tile_x) * 4;
                     values.extend(
                         rgba[start..start + tile_width * 4]
-                            .chunks_exact(4)
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
                             .map(|pixel| format.pixel(pixel) >> shift),
                     );
                 }
