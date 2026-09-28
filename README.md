@@ -22,8 +22,8 @@ The ILOM only offers TLS 1.2 with RSA key exchange, so the client uses the
 system OpenSSL through `native-tls` (rustls cannot talk to it).
 
 ```sh
-cargo build --release   # needs openssl-devel (pkg-config: openssl)
-cargo test
+cargo build --workspace --release   # needs openssl-devel (pkg-config: openssl)
+cargo test --workspace
 ```
 
 ## Use
@@ -90,9 +90,44 @@ cargo run --release -- media --floppy stick.img --writable
 Diagnostics:
 
 ```sh
-RUST_LOG=ilom_kvm=debug cargo run -- probe --frames 3          # saves PNGs to captures/
-RUST_LOG=ilom_kvm=debug cargo run -- probe --jnlp file.jnlp
+RUST_LOG=ilom_kvm_core=debug cargo run -- probe --frames 3     # saves PNGs to captures/
+RUST_LOG=ilom_kvm_core=debug cargo run -- probe --jnlp file.jnlp
 ```
+
+## VNC bridge
+
+`ilom-vnc` serves the console as a local VNC (RFB 3.3–3.8) server, so any VNC
+client can show it: RustConn, Remmina, TigerVNC or `remote-viewer`.
+
+```sh
+cargo run --release -p ilom-vnc              # ILOM_* from .env, listens on 127.0.0.1:5900
+cargo run --release -p ilom-vnc -- --listen 127.0.0.1:5901 --layout fr
+remote-viewer vnc://127.0.0.1:5900
+```
+
+In RustConn, add a **VNC** connection to `127.0.0.1`, port `5900`.
+
+- One ILOM session is shared by all clients. It starts with the first client
+  (the first picture takes about 10 s) and closes when no client has been
+  connected for `--idle-timeout` seconds (default 30), which frees the ILOM's
+  few session slots. Rejected credentials or a changed certificate stop the
+  bridge from logging in again until it restarts.
+- Keys: clients that send QEMU extended key events (gtk-vnc, TigerVNC) send
+  physical key positions, as the egui viewer does. Other clients send
+  characters, which are typed through the host layout (`--layout us|fr` or
+  `ILOM_LAYOUT`, default from the locale). Characters then come out right
+  whatever the client's own layout is.
+- The host cursor is drawn into the picture. Clients that draw a local cursor
+  show a small dot at the pointer.
+- Encodings: ZRLE and Raw, with only changed tiles sent. DesktopSize follows
+  host resolution changes.
+- Not supported: clipboard (ignored), mouse wheel (the SP's reports have no
+  wheel), virtual media (use the viewer or `ilom-kvm media`).
+
+Security: the server listens on loopback only unless `ILOM_VNC_PASSWORD` is
+set. With a password it offers VNC Authentication, which is weak: DES, and
+only 8 characters count. For remote access, tunnel through SSH
+(`ssh -L 5900:127.0.0.1:5900 host`) rather than listening on the network.
 
 Files live in the config directory: `~/.config/ilom-kvm` on Linux,
 `~/Library/Application Support/ilom-kvm` on macOS (an existing
@@ -120,6 +155,9 @@ The repository is a Cargo workspace:
 - `crates/ilom-kvm-core`: protocol and session library, with no GUI code.
 - `crates/ilom-kvm`: the egui viewer and the `probe`, `media` and
   `forget-cert` commands.
+- `crates/ilom-vnc`: the VNC bridge (`rfb.rs` wire format and encodings,
+  `keys.rs` keysym and scancode mapping, `hub.rs` shared session, `client.rs`
+  per-client connection).
 
 Main modules of `ilom-kvm-core`:
 
