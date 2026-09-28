@@ -42,7 +42,7 @@ jobs:
           fi
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        uses: $/.github/actions/linux-deps
+        uses: ./.github/actions/linux-deps
       - run: cargo test --release --locked
       - run: cargo build --release --locked
       - name: Package
