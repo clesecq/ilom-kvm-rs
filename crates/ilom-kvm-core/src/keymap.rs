@@ -68,6 +68,17 @@ impl Layout {
             Self::French => french(ch),
         }
     }
+
+    /// Key that starts `accent` as a dead key (`^`, `¨`, `` ` ``, `~`, `´`),
+    /// or else the key that types it, if any. Front ends that receive dead
+    /// keys as separate events use it to press the same key on the host.
+    pub fn dead_key(self, accent: char) -> Option<Stroke> {
+        match (self, accent) {
+            (Self::French, '^') => Some((0, FR_CIRCUMFLEX_KEY)),
+            (Self::French, '¨') => Some((SHIFT, FR_CIRCUMFLEX_KEY)),
+            _ => self.strokes(accent)?.first().copied(),
+        }
+    }
 }
 
 fn letter_usage(ch: char) -> u8 {
@@ -247,6 +258,17 @@ mod tests {
         assert_eq!(Layout::French.strokes('&'), Some(vec![(0, 0x1e)]));
         assert_eq!(Layout::French.strokes('@'), Some(vec![(ALTGR, 0x27)]));
         assert_eq!(Layout::French.strokes('.'), Some(vec![(SHIFT, 0x36)]));
+    }
+
+    #[test]
+    fn dead_key_presses_the_accent_key_alone() {
+        assert_eq!(Layout::French.dead_key('^'), Some((0, FR_CIRCUMFLEX_KEY)));
+        assert_eq!(
+            Layout::French.dead_key('¨'),
+            Some((SHIFT, FR_CIRCUMFLEX_KEY))
+        );
+        assert_eq!(Layout::Us.dead_key('~'), Some((SHIFT, 0x35)));
+        assert_eq!(Layout::Us.dead_key('¨'), None);
     }
 
     #[test]
