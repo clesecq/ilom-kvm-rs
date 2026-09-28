@@ -21,6 +21,6 @@ updates:
     groups:
       # RustCrypto crates share the cipher/digest traits and must move together.
       rustcrypto:
-        patterns: [aes, cbc, cipher, md-5, sha2]
+        patterns: [aes, cbc, cipher, des, md-5, sha2]
       cargo-minor:
         update-types: [minor, patch]
