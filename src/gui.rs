@@ -372,6 +372,9 @@ pub struct ViewerApp {
     login: Option<(String, String)>,
     pub layout: Layout,
     texture: Option<TextureHandle>,
+    texture_options: TextureOptions,
+    /// Show host pixels 1:1 instead of fitting the window.
+    actual_size: bool,
     displayed_frame: Option<Arc<DecodedFrame>>,
     pressed_usages: BTreeSet<u8>,
     modifiers: u8,
@@ -419,6 +422,8 @@ impl ViewerApp {
             login,
             layout,
             texture: None,
+            texture_options: TextureOptions::LINEAR,
+            actual_size: false,
             displayed_frame: None,
             pressed_usages: BTreeSet::new(),
             modifiers: 0,
@@ -454,18 +459,22 @@ impl ViewerApp {
         {
             return;
         }
+        self.upload_texture(ctx, &frame);
+        self.displayed_frame = Some(frame);
+    }
+
+    fn upload_texture(&mut self, ctx: &egui::Context, frame: &DecodedFrame) {
         let image = ColorImage::from_rgba_unmultiplied(
             [frame.width as usize, frame.height as usize],
             &frame.rgba,
         );
         match self.texture.as_mut() {
-            Some(texture) => texture.set(image, TextureOptions::LINEAR),
+            Some(texture) => texture.set(image, self.texture_options),
             None => {
                 self.texture =
-                    Some(ctx.load_texture("ILOM framebuffer", image, TextureOptions::LINEAR));
+                    Some(ctx.load_texture("ILOM framebuffer", image, self.texture_options));
             }
         }
-        self.displayed_frame = Some(frame);
     }
 
     /// Leaves at once, or asks first when the host would lose mounted images.
@@ -646,10 +655,13 @@ impl ViewerApp {
         action
     }
 
+    /// `image_rect` maps positions to host pixels; only `visible` (the part
+    /// inside the viewport) takes input.
     fn handle_mouse(
         &mut self,
         ctx: &egui::Context,
         image_rect: Rect,
+        visible: Rect,
         focused: bool,
         absolute: bool,
     ) {
@@ -669,7 +681,7 @@ impl ViewerApp {
                 Event::PointerButton { pos, .. }
                     if over_toolbar(pos) && self.mouse_buttons == 0 => {}
                 Event::PointerMoved(pos)
-                    if focused && (image_rect.contains(pos) || self.mouse_buttons != 0) =>
+                    if focused && (visible.contains(pos) || self.mouse_buttons != 0) =>
                 {
                     self.send_mouse(pos, image_rect, &frame);
                 }
@@ -678,7 +690,7 @@ impl ViewerApp {
                     button,
                     pressed,
                     ..
-                } if image_rect.contains(pos) || self.mouse_buttons != 0 => {
+                } if visible.contains(pos) || self.mouse_buttons != 0 => {
                     let bit = button_bit(button);
                     if pressed {
                         self.mouse_buttons |= bit;
@@ -1133,6 +1145,11 @@ impl ViewerApp {
                 self.media_menu(ui, kind, status.media(kind));
             }
             ui.separator();
+            ui.toggle_value(&mut self.actual_size, "100%")
+                .on_hover_text(
+                    "Show host pixels 1:1 and scroll when larger than the window; \
+                 off fits the screen to the window",
+                );
             if ui.button("Screenshot").clicked() {
                 self.save_screenshot();
             }
@@ -1158,6 +1175,96 @@ impl ViewerApp {
                 }
                 None => self.notice = None,
             }
+        }
+    }
+
+    /// Draws the framebuffer in `rect` and routes keyboard and mouse input.
+    fn show_framebuffer(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        status: &ViewerStatus,
+        texture_id: egui::TextureId,
+        rect: Rect,
+    ) {
+        self.update_texture_filter(ctx, rect.width());
+        // Only the part inside the viewport takes pointer input.
+        let visible = rect.intersect(ui.clip_rect());
+        let response = ui.put(
+            rect,
+            egui::Image::new((texture_id, rect.size())).sense(Sense::click_and_drag()),
+        );
+        if status.state != ConnectionState::Connected {
+            // Dim the last frame so a stale screen is not mistaken for a live one.
+            ui.painter()
+                .rect_filled(rect, 0, Color32::from_black_alpha(170));
+            let galley = ui.painter().layout(
+                status.message.clone(),
+                egui::FontId::proportional(18.0),
+                Color32::WHITE,
+                (rect.width() - 32.0).max(80.0),
+            );
+            let origin = rect.center() - galley.size() / 2.0;
+            ui.painter().galley(origin, galley, Color32::WHITE);
+        }
+        if response.clicked() || response.drag_started() {
+            response.request_focus();
+        }
+        let focused = response.has_focus();
+        self.captured_by = focused.then_some(response.id);
+        if focused {
+            // Keep Tab and arrows for the host instead of egui focus moves.
+            ui.memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                )
+            });
+            ui.painter().rect_stroke(
+                rect,
+                0,
+                egui::Stroke::new(1.0, Color32::from_rgb(90, 160, 255)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        match self.handle_keyboard(ctx, focused) {
+            Some(HostAction::ToggleCapture) if focused => {
+                ui.memory_mut(|memory| memory.surrender_focus(response.id));
+            }
+            Some(HostAction::ToggleCapture) if self.pending_exit.is_none() => {
+                response.request_focus();
+            }
+            Some(HostAction::Fullscreen) => self.toggle_fullscreen(ctx),
+            Some(HostAction::Paste) => self.paste_clipboard(),
+            Some(HostAction::CtrlAltDel) => self.send(ctrl_alt_del()),
+            Some(HostAction::ToggleCapture) | None => {}
+        }
+        let absolute = status.absolute_mouse;
+        // Without a host key a locked cursor could never be released.
+        let grab = focused && status.keyboard && !absolute && self.host_key_choice.key().is_some();
+        self.set_cursor_grab(ctx, grab);
+        self.handle_mouse(ctx, rect, visible, focused, absolute);
+    }
+
+    /// Sharp pixels at whole-number scales, smooth filtering otherwise.
+    fn update_texture_filter(&mut self, ctx: &egui::Context, width_points: f32) {
+        let Some(frame) = self.displayed_frame.clone() else {
+            return;
+        };
+        let scale = width_points * ctx.pixels_per_point() / frame.width as f32;
+        let options = if scale >= 0.99 && (scale - scale.round()).abs() < 0.01 {
+            TextureOptions::NEAREST
+        } else {
+            TextureOptions::LINEAR
+        };
+        if options != self.texture_options {
+            self.texture_options = options;
+            self.upload_texture(ctx, &frame);
         }
     }
 
@@ -1224,71 +1331,30 @@ impl eframe::App for ViewerApp {
                     });
                     return;
                 };
-                let scale = (available.width() / frame.width as f32)
-                    .min(available.height() / frame.height as f32)
-                    .max(0.01);
-                let size = Vec2::new(frame.width as f32 * scale, frame.height as f32 * scale);
-                let rect = Rect::from_center_size(available.center(), size);
-                let response = ui.put(
-                    rect,
-                    egui::Image::new((texture.id(), size)).sense(Sense::click_and_drag()),
-                );
-                if status.state != ConnectionState::Connected {
-                    // Dim the last frame so a stale screen is not mistaken for a live one.
-                    ui.painter()
-                        .rect_filled(rect, 0, Color32::from_black_alpha(170));
-                    let galley = ui.painter().layout(
-                        status.message.clone(),
-                        egui::FontId::proportional(18.0),
-                        Color32::WHITE,
-                        (rect.width() - 32.0).max(80.0),
-                    );
-                    let origin = rect.center() - galley.size() / 2.0;
-                    ui.painter().galley(origin, galley, Color32::WHITE);
+                let texture_id = texture.id();
+                let frame_size = Vec2::new(frame.width as f32, frame.height as f32);
+                if self.actual_size {
+                    // One host pixel per screen pixel; scroll when it does not fit.
+                    let size = frame_size / ctx.pixels_per_point();
+                    egui::ScrollArea::both()
+                        // Dragging belongs to the host.
+                        .scroll_source(egui::scroll_area::ScrollSource {
+                            mouse_wheel: true,
+                            ..egui::scroll_area::ScrollSource::SCROLL_BAR
+                        })
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
+                            let available = ui.available_rect_before_wrap();
+                            let min =
+                                available.min + ((available.size() - size) / 2.0).max(Vec2::ZERO);
+                            let rect = Rect::from_min_size(min, size);
+                            self.show_framebuffer(ui, &ctx, &status, texture_id, rect);
+                        });
+                } else {
+                    let scale = (available.size() / frame_size).min_elem().max(0.01);
+                    let rect = Rect::from_center_size(available.center(), frame_size * scale);
+                    self.show_framebuffer(ui, &ctx, &status, texture_id, rect);
                 }
-                if response.clicked() || response.drag_started() {
-                    response.request_focus();
-                }
-                let focused = response.has_focus();
-                self.captured_by = focused.then_some(response.id);
-                if focused {
-                    // Keep Tab and arrows for the host instead of egui focus moves.
-                    ui.memory_mut(|memory| {
-                        memory.set_focus_lock_filter(
-                            response.id,
-                            egui::EventFilter {
-                                tab: true,
-                                horizontal_arrows: true,
-                                vertical_arrows: true,
-                                escape: true,
-                            },
-                        )
-                    });
-                    ui.painter().rect_stroke(
-                        rect,
-                        0,
-                        egui::Stroke::new(1.0, Color32::from_rgb(90, 160, 255)),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                match self.handle_keyboard(&ctx, focused) {
-                    Some(HostAction::ToggleCapture) if focused => {
-                        ui.memory_mut(|memory| memory.surrender_focus(response.id));
-                    }
-                    Some(HostAction::ToggleCapture) if self.pending_exit.is_none() => {
-                        response.request_focus();
-                    }
-                    Some(HostAction::Fullscreen) => self.toggle_fullscreen(&ctx),
-                    Some(HostAction::Paste) => self.paste_clipboard(),
-                    Some(HostAction::CtrlAltDel) => self.send(ctrl_alt_del()),
-                    Some(HostAction::ToggleCapture) | None => {}
-                }
-                let absolute = status.absolute_mouse;
-                // Without a host key a locked cursor could never be released.
-                let grab =
-                    focused && status.keyboard && !absolute && self.host_key_choice.key().is_some();
-                self.set_cursor_grab(&ctx, grab);
-                self.handle_mouse(&ctx, rect, focused, absolute);
             });
     }
 }

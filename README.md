@@ -52,6 +52,9 @@ or `none`) with `--host-key` or `ILOM_HOST_KEY`, or in the Keyboard menu for
 the current run. Tap it to capture or release the keyboard; hold it and press
 **F** for fullscreen, **V** to paste text or **Del** for Ctrl+Alt+Del. In
 fullscreen the toolbar hides; move the pointer to the top edge to show it.
+The **100%** toggle shows host pixels 1:1 (scroll with the wheel or the
+scroll bars when the screen is larger than the window); otherwise the screen
+fits the window. Whole-number scales stay sharp.
 
 The **Send keys** menu sends combinations the local system would capture:
 Ctrl+Alt+Del, Ctrl+Alt+F1…F12, Alt+Tab, Super, Print Screen and Magic SysRq.
