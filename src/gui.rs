@@ -203,6 +203,33 @@ impl eframe::App for IlomApp {
     }
 }
 
+/// Client key never sent to the host; see [`ViewerApp::handle_keyboard`].
+const HOST_KEY: Key = Key::ControlRight;
+const HOST_KEY_HELP: &str = "Right Ctrl: capture or release the keyboard\n\
+    Right Ctrl+F: fullscreen\n\
+    Right Ctrl+V: paste text\n\
+    Right Ctrl+Del: Ctrl+Alt+Del";
+
+/// Client shortcut run with the host key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostAction {
+    ToggleCapture,
+    Fullscreen,
+    Paste,
+    CtrlAltDel,
+}
+
+impl HostAction {
+    fn for_key(key: Key) -> Option<Self> {
+        Some(match key {
+            Key::F => Self::Fullscreen,
+            Key::V => Self::Paste,
+            Key::Delete => Self::CtrlAltDel,
+            _ => return None,
+        })
+    }
+}
+
 pub struct ViewerApp {
     handle: ViewerHandle,
     layout: Layout,
@@ -217,6 +244,8 @@ pub struct ViewerApp {
     disconnect_requested: bool,
     /// Framebuffer widget holding keyboard focus in the last frame, if any.
     captured_by: Option<egui::Id>,
+    /// Host key held down; `true` once it was used in a shortcut.
+    host_key: Option<bool>,
     /// Let the host write to the next floppy image mounted.
     floppy_writable: bool,
 }
@@ -242,6 +271,7 @@ impl ViewerApp {
             capture_dir,
             disconnect_requested: false,
             captured_by: None,
+            host_key: None,
             floppy_writable: false,
         }
     }
@@ -276,6 +306,11 @@ impl ViewerApp {
         self.displayed_frame = Some(frame);
     }
 
+    fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
+        self.fullscreen = !self.fullscreen;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+    }
+
     fn notify(&mut self, text: impl Into<String>) {
         self.notice = Some((text.into(), Instant::now()));
     }
@@ -300,58 +335,86 @@ impl ViewerApp {
         self.mouse_buttons = 0;
     }
 
-    fn handle_keyboard(&mut self, ctx: &egui::Context, focused: bool) {
+    /// Forwards key events to the host while `focused`. The host key
+    /// (Right Ctrl) is never forwarded: tapped alone it toggles capture, and
+    /// held with another key it runs a client shortcut.
+    fn handle_keyboard(&mut self, ctx: &egui::Context, focused: bool) -> Option<HostAction> {
         let events = ctx.input(|input| input.events.clone());
-        if !focused
-            || events
-                .iter()
-                .any(|event| matches!(event, Event::WindowFocused(false)))
-        {
-            self.release_input();
-            return;
+        let window_blurred = events
+            .iter()
+            .any(|event| matches!(event, Event::WindowFocused(false)));
+        if window_blurred {
+            self.host_key = None;
         }
 
         // Modifiers come from physical key events so that left and right
         // keys stay distinct: AltGr must reach the host as Right Alt, which
         // egui's merged `Modifiers` (and winit on Linux) cannot express.
         let mut changed = false;
+        let mut action = None;
         for event in events {
-            if let Event::Key {
+            let Event::Key {
                 key,
                 physical_key,
                 pressed,
                 repeat,
                 ..
             } = event
-            {
-                // USB usages name physical positions; the host applies its
-                // own layout, so prefer the physical key when available.
-                let key = physical_key.unwrap_or(key);
-                if let Some(bit) = modifier_bit(key) {
-                    let modifiers = if pressed {
-                        self.modifiers | bit
-                    } else {
-                        self.modifiers & !bit
-                    };
-                    changed |= modifiers != self.modifiers;
-                    self.modifiers = modifiers;
-                    continue;
-                }
-                let Some(usage) = key_to_usage(key) else {
-                    continue;
-                };
+            else {
+                continue;
+            };
+            // USB usages name physical positions; the host applies its
+            // own layout, so prefer the physical key when available.
+            let key = physical_key.unwrap_or(key);
+            if key == HOST_KEY {
                 if pressed {
                     if !repeat {
-                        changed |= self.pressed_usages.insert(usage);
+                        self.host_key = Some(false);
                     }
-                } else {
-                    changed |= self.pressed_usages.remove(&usage);
+                } else if self.host_key.take() == Some(false) {
+                    action = Some(HostAction::ToggleCapture);
                 }
+                continue;
+            }
+            // Releases still go through, so keys held before the host key
+            // do not stick on the host.
+            if pressed && let Some(used) = self.host_key.as_mut() {
+                if !repeat {
+                    *used = true;
+                    action = HostAction::for_key(key).or(action);
+                }
+                continue;
+            }
+            if !focused {
+                continue;
+            }
+            if let Some(bit) = modifier_bit(key) {
+                let modifiers = if pressed {
+                    self.modifiers | bit
+                } else {
+                    self.modifiers & !bit
+                };
+                changed |= modifiers != self.modifiers;
+                self.modifiers = modifiers;
+                continue;
+            }
+            let Some(usage) = key_to_usage(key) else {
+                continue;
+            };
+            if pressed {
+                if !repeat {
+                    changed |= self.pressed_usages.insert(usage);
+                }
+            } else {
+                changed |= self.pressed_usages.remove(&usage);
             }
         }
-        if changed {
+        if !focused || window_blurred {
+            self.release_input();
+        } else if changed {
             self.send_keyboard();
         }
+        action
     }
 
     fn handle_mouse(&mut self, ctx: &egui::Context, image_rect: Rect, focused: bool) {
@@ -577,10 +640,7 @@ impl ViewerApp {
         let mut command = None;
         ui.menu_button("Send keys", |ui| {
             if ui.button("Ctrl+Alt+Del").clicked() {
-                command = Some(ViewerCommand::Keystroke {
-                    modifiers: ctrl_alt,
-                    usage: USAGE_DELETE,
-                });
+                command = Some(ctrl_alt_del());
             }
             if ui.button("Ctrl+Alt+Backspace").clicked() {
                 command = Some(combo(ctrl_alt, USAGE_BACKSPACE));
@@ -717,10 +777,11 @@ impl eframe::App for ViewerApp {
                 if !status.keyboard {
                     ui.weak("Keyboard/mouse off");
                 } else if let Some(id) = self.captured_by {
-                    ui.colored_label(Color32::from_rgb(90, 160, 255), "⌨ Keyboard captured");
+                    ui.colored_label(Color32::from_rgb(90, 160, 255), "⌨ Keyboard captured")
+                        .on_hover_text(HOST_KEY_HELP);
                     if ui
                         .small_button("Release")
-                        .on_hover_text("Stop sending keys to the host")
+                        .on_hover_text("Stop sending keys to the host (Right Ctrl)")
                         .clicked()
                     {
                         ui.memory_mut(|memory| memory.surrender_focus(id));
@@ -728,8 +789,9 @@ impl eframe::App for ViewerApp {
                 } else {
                     ui.colored_label(
                         Color32::from_rgb(235, 185, 70),
-                        "Click the screen to capture the keyboard",
-                    );
+                        "Click the screen or press Right Ctrl to capture the keyboard",
+                    )
+                    .on_hover_text(HOST_KEY_HELP);
                 }
                 ui.separator();
                 ui.add_enabled_ui(status.keyboard, |ui| self.send_keys_menu(ui));
@@ -765,8 +827,7 @@ impl eframe::App for ViewerApp {
                     })
                     .clicked()
                 {
-                    self.fullscreen = !self.fullscreen;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+                    self.toggle_fullscreen(&ctx);
                 }
                 if ui.button("Disconnect").clicked() {
                     self.disconnect_requested = true;
@@ -845,7 +906,16 @@ impl eframe::App for ViewerApp {
                         egui::StrokeKind::Inside,
                     );
                 }
-                self.handle_keyboard(&ctx, focused);
+                match self.handle_keyboard(&ctx, focused) {
+                    Some(HostAction::ToggleCapture) if focused => {
+                        ui.memory_mut(|memory| memory.surrender_focus(response.id));
+                    }
+                    Some(HostAction::ToggleCapture) => response.request_focus(),
+                    Some(HostAction::Fullscreen) => self.toggle_fullscreen(&ctx),
+                    Some(HostAction::Paste) => self.paste_clipboard(),
+                    Some(HostAction::CtrlAltDel) => self.send(ctrl_alt_del()),
+                    None => {}
+                }
                 self.handle_mouse(&ctx, rect, focused);
             });
     }
@@ -855,6 +925,13 @@ impl Drop for ViewerApp {
     fn drop(&mut self) {
         self.release_input();
         self.handle.stop_and_wait();
+    }
+}
+
+fn ctrl_alt_del() -> ViewerCommand {
+    ViewerCommand::Keystroke {
+        modifiers: USB_LEFT_CTRL | USB_LEFT_ALT,
+        usage: USAGE_DELETE,
     }
 }
 
@@ -1016,6 +1093,14 @@ mod tests {
         assert_eq!(key_to_usage(Key::Enter), Some(0x28));
         assert_eq!(key_to_usage(Key::F12), Some(0x45));
         assert_eq!(key_to_usage(Key::ArrowUp), Some(0x52));
+    }
+
+    #[test]
+    fn host_key_shortcuts() {
+        assert_eq!(HostAction::for_key(Key::F), Some(HostAction::Fullscreen));
+        assert_eq!(HostAction::for_key(Key::Delete), Some(HostAction::CtrlAltDel));
+        assert_eq!(HostAction::for_key(Key::A), None);
+        assert_eq!(modifier_bit(HOST_KEY), Some(0x10));
     }
 
     #[test]

@@ -46,6 +46,10 @@ Click the framebuffer to capture the keyboard; the toolbar shows the capture
 state and a **Release** button. Keys are sent by physical position, so the
 host keyboard layout applies.
 
+**Right Ctrl** is the client's host key and never reaches the host (use Left
+Ctrl there): tap it to capture or release the keyboard; hold it and press
+**F** for fullscreen, **V** to paste text or **Del** for Ctrl+Alt+Del.
+
 The **Send keys** menu sends combinations the local system would capture:
 Ctrl+Alt+Del, Ctrl+Alt+F1…F12, Alt+Tab, Super, Print Screen and Magic SysRq.
 The **Keyboard** menu pastes clipboard text (typed with the chosen host
