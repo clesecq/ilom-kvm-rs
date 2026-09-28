@@ -43,31 +43,31 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         uses: ./.github/actions/linux-deps
-      - run: cargo test --release --locked
-      - run: cargo build --release --locked
+      - run: cargo test --workspace --release --locked
+      - run: cargo build --workspace --release --locked
       - name: Package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          name="ilom-kvm-${GITHUB_REF_NAME}-${TARGET}"
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
           mkdir -p dist
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            name="$name.exe"
-            cp target/release/ilom-kvm.exe "dist/$name"
-          else
-            cp target/release/ilom-kvm "dist/$name"
-          fi
+          for exe in ilom-kvm ilom-vnc; do
+            cp "target/release/$exe$suffix" "dist/$exe-${GITHUB_REF_NAME}-${TARGET}$suffix"
+          done
           if [ "$RUNNER_OS" = "Linux" ]; then
             cp LICENSE dist/LICENSE
             cp crates/ilom-kvm-core/third_party/aspeed_codec/LICENSE dist/LICENSE-aspeed_codec
           fi
           cd dist
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            shasum -a 256 "$name" > "$name.sha256"
-          else
-            sha256sum "$name" > "$name.sha256"
-          fi
+          for file in ilom-*; do
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              shasum -a 256 "$file" > "$file.sha256"
+            else
+              sha256sum "$file" > "$file.sha256"
+            fi
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.target }}
@@ -91,7 +91,7 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
-            dist/ilom-kvm-*
+            dist/ilom-*
             !dist/*.sha256
       - name: Create GitHub Release
         env:

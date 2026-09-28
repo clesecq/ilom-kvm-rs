@@ -36,7 +36,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   build:
     name: build (${{ matrix.target }})
@@ -48,13 +48,13 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            exe: ilom-kvm
+            exe: ''
           - os: windows-2025
             target: x86_64-pc-windows-msvc
-            exe: ilom-kvm.exe
+            exe: .exe
           - os: macos-15
             target: aarch64-apple-darwin
-            exe: ilom-kvm
+            exe: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -69,10 +69,12 @@ jobs:
         with:
           key: ${{ matrix.target }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test --release --locked
-      - run: cargo build --release --locked
+      - run: cargo test --workspace --release --locked
+      - run: cargo build --workspace --release --locked
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ilom-kvm-${{ matrix.target }}
-          path: target/release/${{ matrix.exe }}
+          path: |
+            target/release/ilom-kvm${{ matrix.exe }}
+            target/release/ilom-vnc${{ matrix.exe }}
           if-no-files-found: error
