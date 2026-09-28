@@ -32,6 +32,11 @@ const USAGE_F1: u8 = 0x3a;
 const USAGE_F4: u8 = 0x3d;
 const USAGE_PRINT_SCREEN: u8 = 0x46;
 const USAGE_DELETE: u8 = 0x4c;
+/// Image file extensions offered for each virtual drive, also used to pick
+/// the drive for a dropped file.
+const CDROM_EXTENSIONS: &[&str] = &["iso"];
+const FLOPPY_EXTENSIONS: &[&str] = &["img", "ima", "bin"];
+
 /// Host lock keys: toolbar label, LED bit and USB usage.
 const LOCK_KEYS: [(&str, u8, u8); 3] = [
     ("NUM", hid::LED_NUM_LOCK, hid::USAGE_NUM_LOCK),
@@ -491,6 +496,61 @@ impl ViewerApp {
         }
     }
 
+    /// Mounts image files dropped on the window, choosing the drive from the
+    /// extension. A drive that already holds an image is left alone, so a
+    /// stray drop cannot pull media from a running installation.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context, status: &ViewerStatus) {
+        let (hovering, dropped) = ctx.input(|input| {
+            (
+                !input.raw.hovered_files.is_empty(),
+                input.raw.dropped_files.clone(),
+            )
+        });
+        if hovering {
+            let screen = ctx.content_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("drop-hint"),
+            ));
+            painter.rect_filled(screen, 0, Color32::from_black_alpha(180));
+            painter.text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drop an .iso to mount it as CD-ROM, or an .img as floppy/USB",
+                egui::FontId::proportional(20.0),
+                Color32::WHITE,
+            );
+        }
+        for file in dropped {
+            let path = file.path().to_path_buf();
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let Some(kind) = drive_for(&path) else {
+                self.notify(format!(
+                    "Cannot mount {name}: use an .iso (CD-ROM) or .img/.ima/.bin (floppy/USB) file"
+                ));
+                continue;
+            };
+            if let Some(current) = &status.media(kind).image {
+                self.notify(format!(
+                    "{current} is already mounted; unmount it before dropping {name}"
+                ));
+                continue;
+            }
+            self.notify(format!("Mounting {name}"));
+            self.send(ViewerCommand::Mount {
+                kind,
+                path,
+                writable: kind == MediaKind::Floppy && self.floppy_writable,
+            });
+        }
+    }
+
     /// Leaves at once, or asks first when the host would lose mounted images.
     fn request_exit(&mut self, ctx: &egui::Context, status: &ViewerStatus, exit: Exit) {
         if mounted_images(status).is_empty() {
@@ -853,8 +913,8 @@ impl ViewerApp {
                 ui.close();
                 let dialog = rfd::FileDialog::new().set_title(format!("Mount {title} image"));
                 let dialog = match kind {
-                    MediaKind::Cdrom => dialog.add_filter("ISO image", &["iso"]),
-                    MediaKind::Floppy => dialog.add_filter("Disk image", &["img", "ima", "bin"]),
+                    MediaKind::Cdrom => dialog.add_filter("ISO image", CDROM_EXTENSIONS),
+                    MediaKind::Floppy => dialog.add_filter("Disk image", FLOPPY_EXTENSIONS),
                 };
                 if let Some(path) = dialog.add_filter("All files", &["*"]).pick_file() {
                     self.send(ViewerCommand::Mount {
@@ -1373,6 +1433,7 @@ impl eframe::App for ViewerApp {
             self.request_exit(&ctx, &status, Exit::Quit);
         }
         self.confirm_exit_dialog(&ctx, &status);
+        self.handle_dropped_files(&ctx, &status);
 
         let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
         if !fullscreen {
@@ -1506,6 +1567,18 @@ fn render_cursor(cursor: &HostCursor, frame: &DecodedFrame) -> Option<(ColorImag
         Vec2::new(width as f32, height as f32),
     );
     Some((image, host_rect))
+}
+
+/// Virtual drive for an image file, from its extension.
+fn drive_for(path: &std::path::Path) -> Option<MediaKind> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if CDROM_EXTENSIONS.contains(&extension.as_str()) {
+        Some(MediaKind::Cdrom)
+    } else if FLOPPY_EXTENSIONS.contains(&extension.as_str()) {
+        Some(MediaKind::Floppy)
+    } else {
+        None
+    }
 }
 
 /// "CD-ROM: name.iso" for each drive with an image.
@@ -1709,6 +1782,18 @@ mod tests {
         assert_eq!(image.pixels[0], Color32::from_rgb(255, 0, 0));
         assert_eq!(image.pixels[1], Color32::from_rgb(245, 245, 245));
         assert_eq!(image.pixels[2], Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn dropped_files_pick_a_drive() {
+        use std::path::Path;
+        assert_eq!(
+            drive_for(Path::new("/tmp/debian.ISO")),
+            Some(MediaKind::Cdrom)
+        );
+        assert_eq!(drive_for(Path::new("stick.img")), Some(MediaKind::Floppy));
+        assert_eq!(drive_for(Path::new("notes.txt")), None);
+        assert_eq!(drive_for(Path::new("README")), None);
     }
 
     #[test]

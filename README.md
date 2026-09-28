@@ -74,7 +74,9 @@ or `--auto` can reconnect: a downloaded JNLP works for one connection.
 The **CD-ROM…** and **Floppy/USB…** toolbar menus redirect an ISO image or a
 raw disk image to the host's virtual drives. Floppy images are read-only
 unless "Allow the host to write" is ticked before mounting. Mounted images
-come back after a reconnect.
+come back after a reconnect. You can also drop a file on the window: `.iso`
+goes to the CD-ROM, `.img`/`.ima`/`.bin` to the floppy/USB drive. A drop never
+replaces an image that is already mounted.
 
 Headless media redirection (keeps a video session open like the vendor
 client; Ctrl-C to stop):
