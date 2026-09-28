@@ -22,7 +22,25 @@ use crate::{
 
 const USB_LEFT_CTRL: u8 = 0x01;
 const USB_LEFT_ALT: u8 = 0x04;
+const USB_LEFT_GUI: u8 = 0x08;
+const USAGE_A: u8 = 0x04;
+const USAGE_BACKSPACE: u8 = 0x2a;
+const USAGE_TAB: u8 = 0x2b;
+const USAGE_F1: u8 = 0x3a;
+const USAGE_F4: u8 = 0x3d;
+const USAGE_PRINT_SCREEN: u8 = 0x46;
 const USAGE_DELETE: u8 = 0x4c;
+/// Magic SysRq commands offered in the "Send keys" menu.
+const SYSRQ_KEYS: [(char, &str); 8] = [
+    ('h', "Help"),
+    ('s', "Sync disks"),
+    ('u', "Remount read-only"),
+    ('e', "Terminate all tasks"),
+    ('i', "Kill all tasks"),
+    ('r', "Keyboard raw mode off"),
+    ('b', "Reboot now"),
+    ('o', "Power off now"),
+];
 const APP_TITLE: &str = "ILOM Remote Console";
 /// How long a toolbar notice stays visible.
 const NOTICE_TIMEOUT: Duration = Duration::from_secs(6);
@@ -481,6 +499,83 @@ impl ViewerApp {
         ));
     }
 
+    /// Key combinations the local system would otherwise capture.
+    fn send_keys_menu(&mut self, ui: &mut egui::Ui) {
+        let combo = |modifiers, usage| ViewerCommand::TypeStrokes(vec![(modifiers, usage)]);
+        let ctrl_alt = USB_LEFT_CTRL | USB_LEFT_ALT;
+        let mut command = None;
+        ui.menu_button("Send keys", |ui| {
+            if ui.button("Ctrl+Alt+Del").clicked() {
+                command = Some(ViewerCommand::Keystroke {
+                    modifiers: ctrl_alt,
+                    usage: USAGE_DELETE,
+                });
+            }
+            if ui.button("Ctrl+Alt+Backspace").clicked() {
+                command = Some(combo(ctrl_alt, USAGE_BACKSPACE));
+            }
+            ui.menu_button("Ctrl+Alt+F1…F12", |ui| {
+                for n in 0..12 {
+                    if ui.button(format!("Ctrl+Alt+F{}", n + 1)).clicked() {
+                        command = Some(combo(ctrl_alt, USAGE_F1 + n));
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Switch the host's virtual terminal");
+            ui.separator();
+            if ui.button("Alt+Tab").clicked() {
+                command = Some(combo(USB_LEFT_ALT, USAGE_TAB));
+            }
+            if ui.button("Alt+F4").clicked() {
+                command = Some(combo(USB_LEFT_ALT, USAGE_F4));
+            }
+            if ui.button("Super (Windows key)").clicked() {
+                command = Some(combo(USB_LEFT_GUI, 0));
+            }
+            if ui.button("Print Screen").clicked() {
+                command = Some(combo(0, USAGE_PRINT_SCREEN));
+            }
+            ui.separator();
+            ui.menu_button("Magic SysRq", |ui| {
+                for (key, label) in SYSRQ_KEYS {
+                    if ui
+                        .button(format!("Alt+SysRq+{} — {label}", key.to_ascii_uppercase()))
+                        .clicked()
+                    {
+                        self.send_sysrq(key);
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Linux kernel emergency keys");
+        })
+        .response
+        .on_hover_text("Send key combinations that the local system would capture");
+        if let Some(command) = command {
+            self.send(command);
+        }
+    }
+
+    /// Holds Alt+SysRq (Print Screen) while tapping `key`.
+    fn send_sysrq(&self, key: char) {
+        let usage = USAGE_A + (key as u8 - b'a');
+        for usages in [
+            vec![USAGE_PRINT_SCREEN],
+            vec![USAGE_PRINT_SCREEN, usage],
+            vec![USAGE_PRINT_SCREEN],
+        ] {
+            self.send(ViewerCommand::Keyboard {
+                modifiers: USB_LEFT_ALT,
+                usages,
+            });
+        }
+        self.send(ViewerCommand::Keyboard {
+            modifiers: 0,
+            usages: Vec::new(),
+        });
+    }
+
     fn save_screenshot(&mut self) {
         let Some(frame) = self.displayed_frame.as_ref() else {
             self.notify("No frame is available yet");
@@ -543,15 +638,7 @@ impl eframe::App for ViewerApp {
                     "Keyboard/mouse off"
                 });
                 ui.separator();
-                if ui
-                    .add_enabled(status.keyboard, egui::Button::new("Ctrl+Alt+Del"))
-                    .clicked()
-                {
-                    self.send(ViewerCommand::Keystroke {
-                        modifiers: USB_LEFT_CTRL | USB_LEFT_ALT,
-                        usage: USAGE_DELETE,
-                    });
-                }
+                ui.add_enabled_ui(status.keyboard, |ui| self.send_keys_menu(ui));
                 if let Some(leds) = status.leds {
                     for (label, bit, usage) in [
                         ("NUM", hid::LED_NUM_LOCK, hid::USAGE_NUM_LOCK),
