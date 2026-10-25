@@ -12,7 +12,7 @@ arboard = "3"
 clap.workspace = true
 dirs.workspace = true
 dotenvy.workspace = true
-eframe = "0.36.2"
+eframe = "0.37.0"
 hex.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 raw-window-handle = "0.6"
