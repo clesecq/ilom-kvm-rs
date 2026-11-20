@@ -107,7 +107,10 @@ remote-viewer vnc://127.0.0.1:5900
 
 In RustConn, add a **VNC** connection to `127.0.0.1`, port `5900`.
 
-- One ILOM session is shared by all clients. It starts with the first client
+- With a hosts file, each host has its own `listen` address (required, and
+  distinct), its own session and its own password; the loopback-or-password
+  rule applies per listener.
+- One ILOM session is shared by all clients of a host. It starts with the first client
   (the first picture takes about 10 s) and closes when no client has been
   connected for `--idle-timeout` seconds (default 30), which frees the ILOM's
   few session slots. Rejected credentials or a changed certificate stop the
@@ -148,6 +151,36 @@ A JNLP secret works **once**. With web credentials, every connection (and
 every reconnect) mints a fresh JNLP and then closes the web session straight
 away, because the ILOM has only a few web session slots.
 
+## Several ILOMs
+
+`ilom-mcp` and `ilom-vnc` can drive several ILOMs from one process. Name them
+in `hosts.toml` in the config directory (`ILOM_HOSTS` or `--hosts <file>`
+select another file):
+
+```toml
+[hosts.rack1]
+host = "10.0.0.5"          # or jnlp = "/path/jnlpgenerator-file"
+user = "root"              # default root
+layout = "fr"              # optional host keyboard layout
+listen = "127.0.0.1:5901"  # ilom-vnc only, required there, one per host
+media_dir = "/srv/iso"     # ilom-mcp only, optional (see below)
+allow_writable_media = false
+password_env = "ILOM_PASSWORD_RACK1"   # optional
+
+[hosts.rack2]
+host = "10.0.0.6"
+listen = "127.0.0.1:5902"
+```
+
+The ILOM password is read from `password_env` if set, else
+`ILOM_PASSWORD_<NAME>` (the name in capitals, other characters turned into
+`_`: `rack-1` gives `ILOM_PASSWORD_RACK_1`), else `ILOM_PASSWORD`. The VNC
+password likewise comes from `ILOM_VNC_PASSWORD_<NAME>`, else
+`ILOM_VNC_PASSWORD`. Passwords never go in the file; they can live in `.env`.
+
+Without a hosts file, `--host`/`ILOM_HOST` or `--jnlp` defines one host named
+`default`, as before. When `--host` or `--jnlp` is given, the file is ignored.
+
 ## MCP server
 
 `ilom-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
@@ -174,7 +207,8 @@ Other clients take the same command in their JSON configuration:
 }
 ```
 
-Options are those of `ilom-vnc` without `--listen`: `--host`, `--user`,
+Options are those of `ilom-vnc` without `--listen` (and `--hosts` for several
+ILOMs, see above): `--host`, `--user`,
 `--jnlp` (wins over `--host` and `ILOM_HOST`), `--layout` and `--idle-timeout`
 (default 60 s), with `ILOM_*` read from the environment or `.env`. Two more
 control `mount_media`: `--media-dir` (`ILOM_MCP_MEDIA_DIR`) and
@@ -183,6 +217,9 @@ because stdout carries the protocol.
 
 Tools:
 
+- `list_hosts`: the configured hosts and their console state, without opening
+  a session. With several hosts, every other tool takes a `host` argument; it
+  can be left out only when there is one host (the error lists the names).
 - `screenshot`: the host screen as a PNG, with the connection state in the
   text. A reconnecting console shows its last picture, and the text then says
   it may be old. A host that sends no video gives a text answer instead.
@@ -194,9 +231,10 @@ Tools:
   place after a resolution change. The result states the screen size.
 - `status`: connection state, keyboard LEDs and the virtual media drives.
 - `mount_media` and `unmount_media`: attach an ISO (`cdrom`) or a raw image
-  (`floppy`) from `--media-dir`. Mounting is refused without that option,
+  (`floppy`) from the host's `media_dir`, else `--media-dir`. Mounting is refused without that option,
   for paths outside it (symlinks are resolved first), and for `writable`
-  unless `--allow-writable-media` is set.
+  unless the host's `allow_writable_media` (else `--allow-writable-media`)
+  is true.
 
 Limits: the first call takes about 10 s (it opens the console session). The
 session closes after `--idle-timeout` seconds without calls, except while
@@ -215,7 +253,8 @@ trust, and keep the ILOM credentials out of shared configuration files.
 
 The repository is a Cargo workspace:
 
-- `crates/ilom-kvm-core`: protocol and session library, with no GUI code.
+- `crates/ilom-kvm-core`: protocol and session library, with no GUI code
+  (`hosts.rs` reads the named hosts file for the headless front ends).
 - `crates/ilom-kvm`: the egui viewer and the `probe`, `media` and
   `forget-cert` commands.
 - `crates/ilom-vnc`: the VNC bridge (`rfb.rs` wire format and encodings,
@@ -223,7 +262,8 @@ The repository is a Cargo workspace:
   per-client connection).
 - `crates/ilom-mcp`: the MCP server (`console.rs` blocking session operations
   on the VNC bridge's `Hub`, `tools.rs` the tools, `keys.rs` key names to USB
-  usages). It is the only crate that uses `tokio`.
+  usages, `registry.rs` the named hosts). It is the only crate that uses
+  `tokio`.
 
 Main modules of `ilom-kvm-core`:
 

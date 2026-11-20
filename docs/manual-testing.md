@@ -228,3 +228,21 @@ Wrong password (only with care: repeated failures may lock the account):
       log shows the ILOM session closing.
 - [ ] A wrong `ILOM_PASSWORD`: tools return the login error, and later calls
       get the same error without a new web login.
+
+## Several ILOMs
+
+Needs two ILOMs in `hosts.toml` (`rack1`, `rack2`, each with its own `listen`).
+
+- [ ] `ilom-mcp`: `list_hosts` names both without opening a session; a tool
+      call without `host` returns an error listing the names; `screenshot`
+      with `host` shows the matching host's screen each time.
+- [ ] `ilom-mcp`: `mount_media` uses each host's own `media_dir`; a path
+      from the other host's directory is refused.
+- [ ] `ilom-vnc`: a client on each port sees its own host; the log shows one
+      session per host.
+- [ ] A wrong password for one host (`ILOM_PASSWORD_RACK1`) fails that host
+      only; the other keeps working.
+- [ ] Two hosts with the same `listen`, or one without it, make `ilom-vnc`
+      refuse to start with a message naming them.
+- [ ] `--host` on the command line ignores `hosts.toml` and serves one host
+      called `default`.
