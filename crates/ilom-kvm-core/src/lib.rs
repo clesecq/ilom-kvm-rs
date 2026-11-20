@@ -7,6 +7,7 @@ pub mod codec;
 pub mod config;
 pub mod crypto;
 pub mod hid;
+pub mod hosts;
 pub mod ivtp;
 pub mod jnlp;
 pub mod keymap;
