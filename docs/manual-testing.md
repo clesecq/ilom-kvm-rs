@@ -274,3 +274,30 @@ Use a temporary file: `ILOM_HOSTS=/tmp/hosts.toml cargo run --release`.
       viewer.
 - [ ] The next start preselects the last picked host (`last_host_name` in
       `settings`).
+
+## Keyring passwords
+
+Needs a desktop keyring (Keychain, Credential Manager or a Secret Service
+such as GNOME Keyring or KWallet) and a host in `hosts.toml` with no
+`ILOM_PASSWORD*` variable set.
+
+- [ ] Pick the host, type the password, tick **Save password to the OS
+      keyring**, connect: the entry `ilom-kvm` / host name appears in the
+      native keyring viewer only after the console is up.
+- [ ] A failed login with the box ticked saves nothing.
+- [ ] Restart the viewer: the form says the password comes from the keyring
+      and Connect works without typing.
+- [ ] Change the saved password in the keyring viewer to a wrong one: the
+      login is rejected, the form says the saved password was removed and asks
+      for the password again; typing the right one (and saving) replaces it.
+      Without that, a stale password would be retried on every start and could
+      lock the ILOM account after repeated failures: confirm no retry loop.
+- [ ] `ILOM_PASSWORD_<NAME>` set in the environment beats the keyring entry.
+- [ ] `ilom-mcp` and `ilom-vnc` start with no password variable and a saved
+      entry, and log in.
+- [ ] **Forget password** in Manage hosts deletes the entry; renaming the host
+      moves it; deleting the host removes it.
+- [ ] Headless (no Secret Service, e.g. over SSH): `ilom-mcp` and `ilom-vnc`
+      warn `keyring not used`, return within about 3 s and fail with the
+      "no ILOM password" error; with the env password they still work.
+- [ ] `ilom-kvm probe --name <host>` uses the keyring password.

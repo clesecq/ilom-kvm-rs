@@ -47,8 +47,11 @@ The login form has a host picker when `hosts.toml` (see
 [Several ILOMs](#several-iloms)) lists hosts: picking one fills in its address,
 user and keyboard layout (for that session only), and the last pick is
 remembered. The password comes from the environment (`password_env`,
-`ILOM_PASSWORD_<NAME>` or `ILOM_PASSWORD`); the form asks for it only when none
-is set, and it is never saved. **Manage hosts…** adds, edits and removes
+`ILOM_PASSWORD_<NAME>` or `ILOM_PASSWORD`), else from the OS keyring (see
+[Several ILOMs](#several-iloms)); the form asks for it only when neither has
+one. Tick **Save password to the OS keyring** and it is stored once the login
+succeeds. A saved password the ILOM rejects is deleted so you can type a new
+one. **Manage hosts…** (with a **Forget password** button per host) adds, edits and removes
 entries. Saving keeps comments and the `listen`, `media_dir` and
 `allow_writable_media` keys that the viewer does not edit. **Custom** keeps the
 manual address entry. `--name` preselects a host (and `--auto` connects to it);
@@ -151,7 +154,7 @@ Files live in the config directory: `~/.config/ilom-kvm` on Linux,
 
 The GUI remembers the last host, username, host key, host layout and view
 (fit or 100%) in `settings` (override with `ILOM_SETTINGS`); the password is
-never stored.
+never stored there (the optional keyring entry is separate).
 Command-line options and environment variables win over saved values.
 
 The first web login to an ILOM stores its certificate fingerprint in
@@ -190,6 +193,16 @@ The ILOM password is read from `password_env` if set, else
 `_`: `rack-1` gives `ILOM_PASSWORD_RACK_1`), else `ILOM_PASSWORD`. The VNC
 password likewise comes from `ILOM_VNC_PASSWORD_<NAME>`, else
 `ILOM_VNC_PASSWORD`. Passwords never go in the file; they can live in `.env`.
+
+When no environment variable has the ILOM password, the OS keyring is tried:
+an entry with service `ilom-kvm` and the host's name as user (Keychain on
+macOS, Credential Manager on Windows, Secret Service on Linux, talking D-Bus
+in pure Rust, so no system library is needed). The viewer saves it (see
+[Use](#use)); `ilom-mcp`, `ilom-vnc` and `ilom-kvm --name` read it. A locked
+or missing keyring is skipped after at most 3 s, with a warning, and the usual
+"no password" error follows. Renaming a host in the viewer moves its entry;
+deleting the host deletes it. `ILOM_VNC_PASSWORD` is not kept in the keyring.
+The `probe` and `media` commands accept `--name` too.
 
 Without a hosts file, `--host`/`ILOM_HOST` or `--jnlp` defines one host named
 `default`, as before. When `--host` or `--jnlp` is given, the file is ignored.
