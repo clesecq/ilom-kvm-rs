@@ -77,4 +77,5 @@ jobs:
           path: |
             target/release/ilom-kvm${{ matrix.exe }}
             target/release/ilom-vnc${{ matrix.exe }}
+            target/release/ilom-mcp${{ matrix.exe }}
           if-no-files-found: error

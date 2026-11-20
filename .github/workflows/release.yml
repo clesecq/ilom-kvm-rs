@@ -53,7 +53,7 @@ jobs:
           suffix=""
           if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
           mkdir -p dist
-          for exe in ilom-kvm ilom-vnc; do
+          for exe in ilom-kvm ilom-vnc ilom-mcp; do
             cp "target/release/$exe$suffix" "dist/$exe-${GITHUB_REF_NAME}-${TARGET}$suffix"
           done
           if [ "$RUNNER_OS" = "Linux" ]; then
