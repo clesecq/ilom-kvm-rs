@@ -3,4 +3,5 @@
 
 pub mod console;
 pub mod keys;
+pub mod registry;
 pub mod tools;

@@ -16,21 +16,36 @@ use serde::Deserialize;
 use crate::{
     console::{Button, Console, Pointer, state_label},
     keys,
+    registry::Registry,
 };
 
 const INSTRUCTIONS: &str = "Drives the host console of an Oracle ILOM server: \
 screenshots, keyboard, mouse and virtual media. The first call opens the console \
 session and takes about 10 seconds. Mouse coordinates are pixels of the latest \
-screenshot.";
+screenshot. Several ILOM hosts may be configured: pass `host` (see list_hosts) \
+to pick one; it can be omitted only when there is a single host.";
 
 #[derive(Clone)]
 pub struct IlomServer {
-    console: Arc<Console>,
+    registry: Arc<Registry>,
     tool_router: ToolRouter<Self>,
+}
+
+/// Parameters of the tools that only pick a host.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HostParams {
+    /// Name of the ILOM host (see list_hosts). Optional when only one host
+    /// is configured.
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TypeTextParams {
+    /// Name of the ILOM host (see list_hosts). Optional when only one host
+    /// is configured.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Text to type on the host keyboard. Newlines press Enter. Characters
     /// the host layout cannot produce are skipped and reported.
     pub text: String,
@@ -38,6 +53,10 @@ pub struct TypeTextParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendKeysParams {
+    /// Name of the ILOM host (see list_hosts). Optional when only one host
+    /// is configured.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Modifiers held while each key is pressed: ctrl, shift, alt, altgr or
     /// super (also rctrl, rshift, rgui). Empty for none.
     #[serde(default)]
@@ -71,6 +90,10 @@ pub enum MouseButton {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MouseParams {
+    /// Name of the ILOM host (see list_hosts). Optional when only one host
+    /// is configured.
+    #[serde(default)]
+    pub host: Option<String>,
     pub action: MouseAction,
     /// Column in pixels of the latest screenshot, 0 at the left.
     pub x: u32,
@@ -106,6 +129,10 @@ impl From<Drive> for MediaKind {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MountParams {
+    /// Name of the ILOM host (see list_hosts). Optional when only one host
+    /// is configured.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Virtual drive to attach the image to.
     pub kind: Drive,
     /// Image file below the media directory the server was started with
@@ -120,25 +147,34 @@ pub struct MountParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UnmountParams {
+    /// Name of the ILOM host (see list_hosts). Optional when only one host
+    /// is configured.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Virtual drive to release.
     pub kind: Drive,
 }
 
 impl IlomServer {
-    pub fn new(console: Console) -> Self {
+    pub fn new(registry: Registry) -> Self {
         Self {
-            console: Arc::new(console),
+            registry: Arc::new(registry),
             tool_router: Self::tool_router(),
         }
     }
 
     /// Runs blocking console work off the async runtime. An `Err` becomes a
     /// tool error the agent can read.
-    async fn run<F>(&self, work: F) -> Result<CallToolResult, ErrorData>
+    async fn run<F>(&self, host: Option<String>, work: F) -> Result<CallToolResult, ErrorData>
     where
         F: FnOnce(&Console) -> Result<Vec<ContentBlock>, String> + Send + 'static,
     {
-        let console = self.console.clone();
+        let console = match self.registry.resolve(host.as_deref()) {
+            Ok(console) => console.clone(),
+            Err(message) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(message)]));
+            }
+        };
         let outcome = tokio::task::spawn_blocking(move || work(&console))
             .await
             .map_err(|error| {
@@ -154,10 +190,28 @@ impl IlomServer {
 #[tool_router]
 impl IlomServer {
     #[tool(
+        description = "List the configured ILOM hosts with their console connection state. Does not open any session."
+    )]
+    async fn list_hosts(&self) -> Result<CallToolResult, ErrorData> {
+        let registry = self.registry.clone();
+        let lines = tokio::task::spawn_blocking(move || registry.describe())
+            .await
+            .map_err(|error| {
+                ErrorData::internal_error(format!("tool task failed: {error}"), None)
+            })?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            lines.join("\n"),
+        )]))
+    }
+
+    #[tool(
         description = "Take a screenshot of the host console as a PNG image. Mouse coordinates are pixels of this image; the text says whether the console is connected, because a reconnecting console shows its last picture."
     )]
-    async fn screenshot(&self) -> Result<CallToolResult, ErrorData> {
-        self.run(|console| {
+    async fn screenshot(
+        &self,
+        Parameters(params): Parameters<HostParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run(params.host, |console| {
             Ok(match console.screenshot()? {
                 Some(shot) => {
                     let mut note = format!(
@@ -192,7 +246,8 @@ impl IlomServer {
         &self,
         Parameters(params): Parameters<TypeTextParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run(move |console| {
+        let host = params.host.clone();
+        self.run(host, move |console| {
             let (count, skipped) = console.type_text(&params.text)?;
             let mut message = format!("typed {count} keystrokes");
             if !skipped.is_empty() {
@@ -213,7 +268,8 @@ impl IlomServer {
         &self,
         Parameters(params): Parameters<SendKeysParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run(move |console| {
+        let host = params.host.clone();
+        self.run(host, move |console| {
             let (modifiers, usages) = parse_keys(&params)?;
             console.send_keys(modifiers, &usages)?;
             Ok(vec![ContentBlock::text(format!(
@@ -231,7 +287,8 @@ impl IlomServer {
         &self,
         Parameters(params): Parameters<MouseParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run(move |console| {
+        let host = params.host.clone();
+        self.run(host, move |console| {
             let action = match params.action {
                 MouseAction::Move => Pointer::Move,
                 MouseAction::Click => Pointer::Click,
@@ -260,8 +317,11 @@ impl IlomServer {
     #[tool(
         description = "Report the console connection state, host keyboard LEDs, input availability and the virtual media drives."
     )]
-    async fn status(&self) -> Result<CallToolResult, ErrorData> {
-        self.run(|console| {
+    async fn status(
+        &self,
+        Parameters(params): Parameters<HostParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run(params.host, |console| {
             let status = console.status()?;
             let mut lines = vec![
                 format!(
@@ -314,7 +374,8 @@ impl IlomServer {
         &self,
         Parameters(params): Parameters<MountParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run(move |console| {
+        let host = params.host.clone();
+        self.run(host, move |console| {
             let message = console.mount(params.kind.into(), &params.path, params.writable)?;
             Ok(vec![ContentBlock::text(message)])
         })
@@ -326,7 +387,8 @@ impl IlomServer {
         &self,
         Parameters(params): Parameters<UnmountParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run(move |console| {
+        let host = params.host.clone();
+        self.run(host, move |console| {
             Ok(vec![ContentBlock::text(
                 console.unmount(params.kind.into())?,
             )])
@@ -370,7 +432,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lists_the_seven_tools() {
+    fn lists_the_eight_tools() {
         let mut names: Vec<_> = IlomServer::tool_router()
             .list_all()
             .into_iter()
@@ -380,6 +442,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "list_hosts",
                 "mount_media",
                 "mouse",
                 "screenshot",
@@ -401,6 +464,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(params.expected_width, Some(640));
+        let params: TypeTextParams =
+            serde_json::from_str(r#"{"text":"a","host":"rack1"}"#).unwrap();
+        assert_eq!(params.host.as_deref(), Some("rack1"));
+        let params: HostParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(params.host, None);
         let params: MountParams =
             serde_json::from_str(r#"{"kind":"cdrom","path":"/tmp/a.iso"}"#).unwrap();
         assert!(!params.writable);
@@ -410,11 +478,13 @@ mod tests {
     #[test]
     fn ctrl_alt_del() {
         let params = SendKeysParams {
+            host: None,
             modifiers: vec!["ctrl".into(), "alt".into()],
             keys: vec!["delete".into()],
         };
         assert_eq!(parse_keys(&params), Ok((0x05, vec![0x4c])));
         let bad = SendKeysParams {
+            host: None,
             modifiers: vec![],
             keys: vec!["bogus".into()],
         };

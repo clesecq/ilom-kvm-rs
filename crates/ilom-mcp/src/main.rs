@@ -1,11 +1,14 @@
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use ilom_kvm_core::{keymap::Layout, session::Source};
+use ilom_kvm_core::{
+    hosts::{DEFAULT_NAME, Host, HostsFile, parse_layout},
+    keymap::Layout,
+};
 use ilom_mcp::{
     console::{Console, MediaPolicy},
+    registry::Registry,
     tools::IlomServer,
 };
 use ilom_vnc::hub::Hub;
@@ -16,14 +19,20 @@ use tracing_subscriber::EnvFilter;
 /// MCP server (stdio) for the Oracle ILOM Remote System Console.
 ///
 /// Lets an MCP client such as Claude Code see the host screen and drive its
-/// keyboard, mouse and virtual media. The ILOM password comes from
-/// ILOM_PASSWORD (may be set in `.env`). Logs go to stderr: stdout carries
-/// the protocol.
+/// keyboard, mouse and virtual media. Several ILOMs can be named in a hosts
+/// file (`hosts.toml` in the config directory, or --hosts); without one,
+/// --host or --jnlp defines a single host called `default`. The ILOM
+/// password comes from ILOM_PASSWORD or ILOM_PASSWORD_<NAME> (may be set in
+/// `.env`). Logs go to stderr: stdout carries the protocol.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
+    /// Hosts file [default: hosts.toml in the config directory]. Ignored when
+    /// --host or --jnlp is given.
+    #[arg(long, env = "ILOM_HOSTS")]
+    hosts: Option<PathBuf>,
     /// ILOM address; logs into the web UI for every console session.
-    #[arg(long, env = "ILOM_HOST", required_unless_present = "jnlp")]
+    #[arg(long, env = "ILOM_HOST")]
     host: Option<String>,
     #[arg(long, env = "ILOM_USER", default_value = "root")]
     user: String,
@@ -32,11 +41,12 @@ struct Cli {
     /// be restarted.
     #[arg(long)]
     jnlp: Option<PathBuf>,
-    /// Directory the `mount_media` tool may read images from. Without it,
-    /// mounting is refused.
+    /// Directory the `mount_media` tool may read images from, for hosts
+    /// without their own `media_dir`. Without one, mounting is refused.
     #[arg(long, env = "ILOM_MCP_MEDIA_DIR")]
     media_dir: Option<PathBuf>,
-    /// Let `mount_media` give the host write access to floppy images.
+    /// Let `mount_media` give hosts write access to floppy images, unless
+    /// their `allow_writable_media` says otherwise.
     #[arg(long, env = "ILOM_MCP_ALLOW_WRITABLE_MEDIA")]
     allow_writable_media: bool,
     /// Keyboard layout configured on the host, used by `type_text`
@@ -47,16 +57,6 @@ struct Cli {
     /// media keeps it open regardless.
     #[arg(long, default_value_t = 60)]
     idle_timeout: u64,
-}
-
-fn parse_layout(value: &str) -> Result<Layout, String> {
-    Layout::from_id(value).ok_or_else(|| {
-        let ids: Vec<_> = Layout::ALL.iter().map(|layout| layout.id()).collect();
-        format!(
-            "unknown layout {value:?}, expected one of {}",
-            ids.join(", ")
-        )
-    })
 }
 
 #[tokio::main]
@@ -70,28 +70,49 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
 
-    let source = match (&cli.jnlp, &cli.host) {
-        (Some(path), _) => Source::Jnlp(path.clone()),
-        (None, Some(host)) => {
-            let password = std::env::var("ILOM_PASSWORD")
-                .context("set ILOM_PASSWORD in the environment or .env")?;
-            Source::Web {
-                host: host.clone(),
-                username: cli.user.clone(),
-                password,
-            }
+    let hosts = if cli.host.is_some() || cli.jnlp.is_some() {
+        let host = Host {
+            host: cli.host.clone().filter(|_| cli.jnlp.is_none()),
+            jnlp: cli.jnlp.clone(),
+            user: Some(cli.user.clone()),
+            ..Host::default()
+        };
+        BTreeMap::from([(DEFAULT_NAME.to_string(), host)])
+    } else {
+        let path = match &cli.hosts {
+            Some(path) => path.clone(),
+            None => HostsFile::default_path()?,
+        };
+        let file = HostsFile::load(&path)?;
+        if file.hosts.is_empty() {
+            bail!(
+                "no ILOM host: pass --host (or set ILOM_HOST) or --jnlp, or describe hosts in {}",
+                path.display()
+            );
         }
-        (None, None) => bail!("pass --host (or set ILOM_HOST) or --jnlp"),
+        file.hosts
     };
 
-    let hub = Hub::new(source, Duration::from_secs(cli.idle_timeout));
-    let policy = MediaPolicy {
-        dir: cli.media_dir,
-        allow_writable: cli.allow_writable_media,
-    };
-    let console = Console::new(hub, cli.layout.unwrap_or_else(Layout::from_locale), policy);
+    let env = |key: &str| std::env::var(key).ok();
+    let mut consoles = BTreeMap::new();
+    for (name, host) in &hosts {
+        let source = host.source(name, &env)?;
+        let hub = Hub::new(source, Duration::from_secs(cli.idle_timeout));
+        let policy = MediaPolicy {
+            dir: host.media_dir.clone().or_else(|| cli.media_dir.clone()),
+            allow_writable: host
+                .allow_writable_media
+                .unwrap_or(cli.allow_writable_media),
+        };
+        let layout = host
+            .layout()
+            .or(cli.layout)
+            .unwrap_or_else(Layout::from_locale);
+        consoles.insert(name.clone(), Arc::new(Console::new(hub, layout, policy)));
+    }
+    info!(hosts = %hosts.keys().cloned().collect::<Vec<_>>().join(", "), "configured");
     info!("MCP server ready on stdio");
-    let service = IlomServer::new(console)
+    let service = IlomServer::new(Registry::new(consoles))
         .serve(stdio())
         .await
         .context("start the MCP server")?;

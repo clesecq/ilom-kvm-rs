@@ -82,11 +82,14 @@ impl MediaPolicy {
     /// checks it stays inside the directory once symlinks are followed.
     pub fn resolve(&self, path: &Path, writable: bool) -> Result<PathBuf, String> {
         let dir = self.dir.as_ref().ok_or(
-            "mounting is disabled: start ilom-mcp with --media-dir (or ILOM_MCP_MEDIA_DIR)",
+            "mounting is disabled for this host: set media_dir in the hosts file, or start ilom-mcp \
+             with --media-dir (ILOM_MCP_MEDIA_DIR)",
         )?;
         if writable && !self.allow_writable {
             return Err(
-                "writable media is disabled: start ilom-mcp with --allow-writable-media".into(),
+                "writable media is disabled for this host: set allow_writable_media in the hosts file, \
+                 or start ilom-mcp with --allow-writable-media"
+                .into(),
             );
         }
         let root = dir
@@ -131,6 +134,14 @@ impl Console {
             input: Mutex::new(()),
             pin: Mutex::new(None),
         }
+    }
+
+    /// Connection state and message of the running session, without
+    /// starting one.
+    pub fn peek(&self) -> Option<(ConnectionState, String)> {
+        let shared = self.hub.peek()?;
+        let status = shared.status.lock().ok()?;
+        Some((status.state, status.message.clone()))
     }
 
     fn input(&self) -> MutexGuard<'_, ()> {

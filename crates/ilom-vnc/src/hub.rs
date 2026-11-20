@@ -56,6 +56,14 @@ impl Hub {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
+    /// The running session's shared state, without starting one.
+    pub fn peek(&self) -> Option<Arc<ViewerShared>> {
+        self.inner()
+            .session
+            .as_ref()
+            .map(|session| session.shared.clone())
+    }
+
     /// Wakes every waiter.
     pub fn notify(&self) {
         let mut signal = self
