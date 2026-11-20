@@ -4,11 +4,13 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ilom_kvm::{
     gui::{HostKey, IlomApp, Startup, ViewerPrefs},
+    hosts_ui::{self, HostsUi},
     settings::{self, Settings},
 };
 use ilom_kvm_core::{
     codec::AspeedCodec,
     hid::HidSession,
+    hosts::HostsFile,
     jnlp::{self, ConsoleArgs},
     keymap::Layout,
     known_certs::KnownCerts,
@@ -53,6 +55,10 @@ struct ViewerArgs {
     /// Connect straight away with a downloaded JNLP file.
     #[arg(long)]
     jnlp: Option<PathBuf>,
+    /// Host from `hosts.toml` to preselect (with --auto, connect to it).
+    /// Ignored when --jnlp or --host is given.
+    #[arg(long)]
+    name: Option<String>,
     /// ILOM address prefilled in the login form [default: last one used].
     #[arg(long, env = "ILOM_HOST")]
     host: Option<String>,
@@ -176,6 +182,7 @@ fn viewer(args: ViewerArgs) -> Result<()> {
             })
         })
         .unwrap_or_default();
+    let explicit_host = args.host.is_some();
     let host = args.host.or_else(|| settings.host.clone());
     let username = args
         .user
@@ -193,14 +200,50 @@ fn viewer(args: ViewerArgs) -> Result<()> {
         .as_deref()
         .and_then(Layout::from_id)
         .unwrap_or_else(Layout::from_locale);
-    let initial = match (&args.jnlp, args.auto) {
-        (Some(path), _) => Some(Source::Jnlp(path.clone())),
-        (None, true) => Some(Source::Web {
+    // --jnlp and --host win over --name, which wins over the form.
+    let named = match (&args.name, &args.jnlp, explicit_host) {
+        (Some(_), Some(_), _) | (Some(_), _, true) => {
+            warn!("--name ignored: --jnlp or --host (or ILOM_HOST) is set");
+            None
+        }
+        (name, _, _) => name.clone(),
+    };
+    let hosts_path = HostsFile::default_path()
+        .inspect_err(|error| warn!(error = %format!("{error:#}"), "hosts file disabled"))
+        .ok();
+    let hosts = HostsUi::load(
+        hosts_path,
+        named.clone().or_else(|| settings.last_host_name.clone()),
+    );
+    let mut layout_override = None;
+    let initial = match (&args.jnlp, named.as_deref(), args.auto) {
+        (Some(path), _, _) => Some(Source::Jnlp(path.clone())),
+        (None, Some(name), auto) => {
+            let host = hosts
+                .file()
+                .hosts
+                .get(name)
+                .with_context(|| format!("no host named {name:?} in the hosts file"))?;
+            layout_override = host.layout();
+            if auto {
+                let env = |key: &str| std::env::var(key).ok();
+                match hosts_ui::resolve(name, host, "", &env) {
+                    hosts_ui::Resolved::Ready(source) => Some(source),
+                    hosts_ui::Resolved::NeedPassword(variable) => {
+                        anyhow::bail!("--auto needs {variable} (or ILOM_PASSWORD)")
+                    }
+                    hosts_ui::Resolved::Invalid(message) => anyhow::bail!(message),
+                }
+            } else {
+                None
+            }
+        }
+        (None, None, true) => Some(Source::Web {
             host: host.clone().context("--auto needs ILOM_HOST")?,
             username: username.clone(),
             password: password.clone().context("--auto needs ILOM_PASSWORD")?,
         }),
-        (None, false) => None,
+        (None, None, false) => None,
     };
     let startup = Startup {
         host,
@@ -214,6 +257,8 @@ fn viewer(args: ViewerArgs) -> Result<()> {
         },
         settings,
         settings_path,
+        hosts,
+        layout_override,
     };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

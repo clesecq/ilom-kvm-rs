@@ -16,6 +16,8 @@ pub const PATH_ENV: &str = "ILOM_SETTINGS";
 pub struct Settings {
     pub host: Option<String>,
     pub username: Option<String>,
+    /// Name of the last host picked from `hosts.toml`.
+    pub last_host_name: Option<String>,
     /// `--host-key` value name, e.g. `right-ctrl`.
     pub host_key: Option<String>,
     /// Host keyboard layout id, e.g. `fr`.
@@ -55,6 +57,7 @@ impl Settings {
             match key.trim() {
                 "host" => settings.host = value,
                 "username" => settings.username = value,
+                "last_host_name" => settings.last_host_name = value,
                 "host_key" => settings.host_key = value,
                 "layout" => settings.layout = value,
                 "scale" => {
@@ -75,6 +78,7 @@ impl Settings {
         for (key, value) in [
             ("host", &self.host),
             ("username", &self.username),
+            ("last_host_name", &self.last_host_name),
             ("host_key", &self.host_key),
             ("layout", &self.layout),
         ] {
@@ -126,6 +130,7 @@ mod tests {
         let settings = Settings {
             host: Some("192.0.2.10".into()),
             username: Some("root".into()),
+            last_host_name: Some("rack1".into()),
             host_key: Some("menu".into()),
             layout: None,
             actual_size: Some(true),

@@ -20,7 +20,11 @@ use ilom_kvm_core::{
     },
 };
 
-use crate::{clipboard::Clipboard, settings::Settings};
+use crate::{
+    clipboard::Clipboard,
+    hosts_ui::{self, HostsUi},
+    settings::Settings,
+};
 
 const USB_LEFT_CTRL: u8 = 0x01;
 const USB_LEFT_ALT: u8 = 0x04;
@@ -69,6 +73,9 @@ pub struct IlomApp {
     settings: Settings,
     settings_path: Option<PathBuf>,
     form_error: Option<String>,
+    hosts: HostsUi,
+    /// Layout of the picked host, for the running session only.
+    layout_override: Option<Layout>,
 }
 
 /// Viewer choices the user can change in the menus.
@@ -90,13 +97,20 @@ pub struct Startup {
     pub prefs: ViewerPrefs,
     pub settings: Settings,
     pub settings_path: Option<PathBuf>,
+    pub hosts: HostsUi,
+    /// Keyboard layout of the host picked on the command line, for this
+    /// session only.
+    pub layout_override: Option<Layout>,
 }
 
 impl IlomApp {
     pub fn new(startup: Startup, initial: Option<Source>, context: &egui::Context) -> Self {
-        let viewer = initial.map(|source| {
-            ViewerApp::new(context, source, startup.capture_dir.clone(), startup.prefs)
-        });
+        let prefs = ViewerPrefs {
+            layout: startup.layout_override.unwrap_or(startup.prefs.layout),
+            ..startup.prefs
+        };
+        let viewer = initial
+            .map(|source| ViewerApp::new(context, source, startup.capture_dir.clone(), prefs));
         Self {
             viewer,
             host: startup.host.unwrap_or_default(),
@@ -107,6 +121,15 @@ impl IlomApp {
             settings: startup.settings,
             settings_path: startup.settings_path,
             form_error: None,
+            hosts: startup.hosts,
+            layout_override: startup.layout_override,
+        }
+    }
+
+    fn session_prefs(&self) -> ViewerPrefs {
+        ViewerPrefs {
+            layout: self.layout_override.unwrap_or(self.prefs.layout),
+            ..self.prefs
         }
     }
 
@@ -135,6 +158,8 @@ impl IlomApp {
     fn show_login(&mut self, ui: &mut egui::Ui) -> Option<Source> {
         let mut connect = false;
         let mut open_jnlp = false;
+        let mut manage_hosts = false;
+        let env = |key: &str| std::env::var(key).ok();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::from_rgb(18, 18, 20)))
             .show(ui, |ui| {
@@ -149,25 +174,71 @@ impl IlomApp {
                         .inner_margin(egui::Margin::same(20))
                         .show(ui, |ui| {
                             ui.set_width(420.0);
-                            ui.label("ILOM address");
-                            let host_response = ui.add(
-                                egui::TextEdit::singleline(&mut self.host)
-                                    .hint_text("192.0.2.10")
-                                    .desired_width(f32::INFINITY),
-                            );
-                            ui.add_space(10.0);
-                            ui.label("Username");
-                            let username_response = ui.add(
-                                egui::TextEdit::singleline(&mut self.username)
-                                    .desired_width(f32::INFINITY),
-                            );
-                            ui.add_space(10.0);
-                            ui.label("Password");
-                            let password_response = ui.add(
-                                egui::TextEdit::singleline(&mut self.password)
-                                    .password(true)
-                                    .desired_width(f32::INFINITY),
-                            );
+                            if self.hosts.show_picker(ui) {
+                                if let Some((_, host)) = self.hosts.selected_host() {
+                                    let fill = hosts_ui::fill(host);
+                                    self.host = fill.address;
+                                    self.username = fill.username;
+                                }
+                                self.form_error = None;
+                            }
+                            let named = self
+                                .hosts
+                                .selected_host()
+                                .map(|(name, host)| (name.to_owned(), host.clone()));
+                            let mut responses = Vec::new();
+                            let mut prompt = None;
+                            if let Some((name, host)) = &named {
+                                ui.add_space(6.0);
+                                match &host.jnlp {
+                                    Some(path) => {
+                                        ui.label(format!("JNLP file: {}", path.display()));
+                                    }
+                                    None => {
+                                        let fill = hosts_ui::fill(host);
+                                        ui.label(format!("{} as {}", fill.address, fill.username));
+                                        prompt = hosts_ui::password_prompt(name, host, &env);
+                                    }
+                                }
+                                ui.add_space(10.0);
+                            } else {
+                                ui.label("ILOM address");
+                                responses.push(
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.host)
+                                            .hint_text("192.0.2.10")
+                                            .desired_width(f32::INFINITY),
+                                    ),
+                                );
+                                ui.add_space(10.0);
+                                ui.label("Username");
+                                responses.push(
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.username)
+                                            .desired_width(f32::INFINITY),
+                                    ),
+                                );
+                                ui.add_space(10.0);
+                            }
+                            let jnlp_host =
+                                named.as_ref().is_some_and(|(_, host)| host.jnlp.is_some());
+                            if named.is_none() || prompt.is_some() {
+                                match &prompt {
+                                    Some(variable) => {
+                                        ui.label(format!("Password ({variable} is not set)"))
+                                    }
+                                    None => ui.label("Password"),
+                                };
+                                responses.push(
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.password)
+                                            .password(true)
+                                            .desired_width(f32::INFINITY),
+                                    ),
+                                );
+                            } else if !jnlp_host {
+                                ui.small("Password from the environment.");
+                            }
                             ui.add_space(14.0);
                             connect = ui
                                 .add_sized(
@@ -176,9 +247,7 @@ impl IlomApp {
                                 )
                                 .clicked()
                                 // Enter in any field submits, like a web form.
-                                || ([host_response, username_response, password_response]
-                                    .iter()
-                                    .any(egui::Response::lost_focus)
+                                || (responses.iter().any(egui::Response::lost_focus)
                                     && ui.input(|input| input.key_pressed(Key::Enter)));
                             ui.add_space(6.0);
                             open_jnlp = ui
@@ -187,6 +256,17 @@ impl IlomApp {
                                     egui::Button::new("Open downloaded JNLP…"),
                                 )
                                 .clicked();
+                            ui.add_space(6.0);
+                            manage_hosts = ui
+                                .add_sized(
+                                    [ui.available_width(), 28.0],
+                                    egui::Button::new("Manage hosts…"),
+                                )
+                                .clicked();
+                            if let Some(error) = &self.hosts.load_error {
+                                ui.add_space(8.0);
+                                ui.colored_label(Color32::from_rgb(235, 90, 90), error);
+                            }
                             if let Some(error) = &self.form_error {
                                 ui.add_space(8.0);
                                 ui.colored_label(Color32::from_rgb(235, 90, 90), error);
@@ -197,7 +277,13 @@ impl IlomApp {
                 });
             });
 
+        if manage_hosts {
+            self.hosts.open_manage();
+        }
+        self.hosts.show_manage(ui.ctx());
         if open_jnlp {
+            self.layout_override = None;
+            self.hosts.selected = None;
             return rfd::FileDialog::new()
                 .set_title("Open ILOM console JNLP")
                 .pick_file()
@@ -206,9 +292,34 @@ impl IlomApp {
         if !connect {
             return None;
         }
+        if let Some((name, host)) = self
+            .hosts
+            .selected_host()
+            .map(|(name, host)| (name.to_owned(), host.clone()))
+        {
+            return match hosts_ui::resolve(&name, &host, &self.password, &env) {
+                hosts_ui::Resolved::Ready(source) => {
+                    self.form_error = None;
+                    self.layout_override = host.layout();
+                    self.settings.last_host_name = Some(name);
+                    self.save_settings();
+                    Some(source)
+                }
+                hosts_ui::Resolved::NeedPassword(_) => {
+                    self.form_error = Some("Enter a password".into());
+                    None
+                }
+                hosts_ui::Resolved::Invalid(message) => {
+                    self.form_error = Some(message);
+                    None
+                }
+            };
+        }
         match self.web_source() {
             Ok(source) => {
                 self.form_error = None;
+                self.layout_override = None;
+                self.settings.last_host_name = None;
                 if let Source::Web { host, username, .. } = &source {
                     self.settings.host = Some(host.clone());
                     self.settings.username = Some(username.clone());
@@ -254,8 +365,14 @@ impl eframe::App for IlomApp {
             let rejected = viewer.rejection();
             let login = viewer.login.clone();
             let leaving = viewer.disconnect_requested || rejected.is_some();
-            self.remember_viewer_choices(prefs);
+            // The picked host's layout is for this session only.
+            let mut persisted = prefs;
+            if self.layout_override == Some(prefs.layout) {
+                persisted.layout = self.prefs.layout;
+            }
+            self.remember_viewer_choices(persisted);
             if leaving {
+                self.layout_override = None;
                 // A rejected session goes back to the form instead of retrying.
                 if let Some((credentials, message)) = rejected {
                     if let Some((host, username)) = login {
@@ -284,7 +401,7 @@ impl eframe::App for IlomApp {
                 ui.ctx(),
                 source,
                 self.capture_dir.clone(),
-                self.prefs,
+                self.session_prefs(),
             ));
         }
     }
