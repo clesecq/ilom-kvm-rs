@@ -301,3 +301,16 @@ such as GNOME Keyring or KWallet) and a host in `hosts.toml` with no
       warn `keyring not used`, return within about 3 s and fail with the
       "no ILOM password" error; with the env password they still work.
 - [ ] `ilom-kvm probe --name <host>` uses the keyring password.
+- [ ] Add host with a Password and **Save to the OS keyring** ticked: the host
+      is selected afterwards, the entry exists in the keyring viewer and
+      `hosts.toml` has no password. Unticking the box before saving stores
+      nothing.
+- [ ] Edit that host: the dialog says a password is saved. Saving with the
+      field empty keeps it; typing a new one replaces it; **Forget saved
+      password** removes it and the text changes.
+- [ ] Renaming the host in the dialog moves the keyring entry.
+- [ ] With the keyring locked or missing, saving a host with a password still
+      saves the host and shows a yellow (not red) notice.
+- [ ] **Advanced** is collapsed, and open for a host that has `password_env`;
+      the value survives a save.
+- [ ] The dialog is centred over a darkened login form.

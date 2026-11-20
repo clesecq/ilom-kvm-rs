@@ -32,6 +32,11 @@ pub struct HostForm {
     pub user: String,
     pub layout: Option<Layout>,
     pub password_env: String,
+    /// Typed password. Never written to the hosts file: it goes to the OS
+    /// keyring on save, or nowhere.
+    pub password: String,
+    /// "Save to the OS keyring" unticked (the box is on by default).
+    pub skip_keyring: bool,
 }
 
 impl HostForm {
@@ -53,6 +58,7 @@ impl HostForm {
             user: host.user.clone().unwrap_or_default(),
             layout: host.layout(),
             password_env: host.password_env.clone().unwrap_or_default(),
+            ..Self::default()
         }
     }
 
@@ -137,6 +143,19 @@ pub fn apply_save(
         }
     }
     HostsFile::save_host(path, &name, &host).map_err(render)?;
+    // The host is saved whatever happens to the password. An empty field
+    // leaves any existing entry alone; a JNLP host has no password.
+    if !form.password.is_empty()
+        && !form.skip_keyring
+        && host.jnlp.is_none()
+        && let Err(error) = store.set(&name, &form.password)
+    {
+        let message = format!("Host saved, but the password could not be saved: {error:#}");
+        warning = Some(match warning {
+            Some(earlier) => format!("{earlier}; {message}"),
+            None => message,
+        });
+    }
     Ok(Saved { name, warning })
 }
 
@@ -219,6 +238,11 @@ struct Manage {
     editing: Option<HostForm>,
     confirm_delete: Option<String>,
     error: Option<String>,
+    /// Something to tell, not a failure of the action.
+    notice: Option<String>,
+    /// Whether the edited host has a keyring entry, asked once when the
+    /// form opens (never per frame).
+    saved_password: Option<bool>,
 }
 
 /// Hosts file, picker selection and dialog state of the login screen.
@@ -236,6 +260,7 @@ pub struct HostsUi {
 }
 
 const ERROR_COLOR: Color32 = Color32::from_rgb(235, 90, 90);
+const NOTICE_COLOR: Color32 = Color32::from_rgb(225, 185, 80);
 
 impl HostsUi {
     pub fn load(
@@ -350,24 +375,37 @@ impl HostsUi {
             return;
         };
         let mut action = None;
-        let modal = egui::Modal::new(egui::Id::new("manage-hosts")).show(ctx, |ui| {
-            ui.set_width(440.0);
-            if manage.editing.is_some() {
-                action = Self::show_form(ui, &mut manage);
-            } else {
-                action = self.show_list(ui, &mut manage);
-            }
-            if let Some(error) = &manage.error {
-                ui.add_space(6.0);
-                ui.colored_label(ERROR_COLOR, error);
-            }
-        });
+        let modal = egui::Modal::new(egui::Id::new("manage-hosts"))
+            .backdrop_color(Color32::from_black_alpha(200))
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                if manage.editing.is_some() {
+                    action = Self::show_form(ui, &mut manage);
+                } else {
+                    action = self.show_list(ui, &mut manage);
+                }
+                if let Some(notice) = &manage.notice {
+                    ui.add_space(6.0);
+                    ui.colored_label(NOTICE_COLOR, notice);
+                }
+                if let Some(error) = &manage.error {
+                    ui.add_space(6.0);
+                    ui.colored_label(ERROR_COLOR, error);
+                }
+            });
         let mut keep = !modal.should_close();
         match action {
             Some(Action::Close) => keep = false,
-            Some(Action::Add) => manage.editing = Some(HostForm::default()),
+            Some(Action::Add) => {
+                manage.error = None;
+                manage.notice = None;
+                manage.saved_password = None;
+                manage.editing = Some(HostForm::default());
+            }
             Some(Action::Edit(name)) => {
                 manage.error = None;
+                manage.notice = None;
+                manage.saved_password = self.store.get(&name).ok().map(|saved| saved.is_some());
                 manage.editing = self
                     .file
                     .hosts
@@ -376,15 +414,30 @@ impl HostsUi {
             }
             Some(Action::Delete(name)) => manage.confirm_delete = Some(name),
             Some(Action::Forget(name)) => {
-                manage.error = Some(match self.store.delete(&name) {
-                    Ok(()) => format!("Saved password of {name} forgotten"),
-                    Err(error) => format!("Could not forget the password: {error:#}"),
-                });
+                manage.error = None;
+                manage.notice = None;
+                match self.store.delete(&name) {
+                    Ok(()) => {
+                        manage.notice = Some(format!("Saved password of {name} forgotten"));
+                        if manage
+                            .editing
+                            .as_ref()
+                            .and_then(|form| form.original.as_deref())
+                            == Some(name.as_str())
+                        {
+                            manage.saved_password = Some(false);
+                        }
+                    }
+                    Err(error) => {
+                        manage.error = Some(format!("Could not forget the password: {error:#}"));
+                    }
+                }
                 self.cache = None;
             }
             Some(Action::CancelDelete) => manage.confirm_delete = None,
             Some(Action::ConfirmDelete(name)) => {
                 manage.confirm_delete = None;
+                manage.notice = None;
                 manage.error = HostsFile::remove_host(&path, &name)
                     .err()
                     .map(|error| format!("{error:#}"));
@@ -400,13 +453,15 @@ impl HostsUi {
             Some(Action::CancelEdit) => {
                 manage.editing = None;
                 manage.error = None;
+                manage.notice = None;
             }
             Some(Action::Save) => {
                 if let Some(form) = manage.editing.clone() {
                     match apply_save(&path, &self.file, &form, self.store.as_ref()) {
                         Ok(saved) => {
                             manage.editing = None;
-                            manage.error = saved.warning;
+                            manage.error = None;
+                            manage.notice = saved.warning;
                             self.selected = Some(saved.name);
                             self.reload();
                         }
@@ -527,12 +582,50 @@ impl HostsUi {
                     ui.selectable_value(&mut form.layout, Some(layout), layout.label());
                 }
             });
-        ui.label("Password variable (optional)");
-        ui.add(
-            egui::TextEdit::singleline(&mut form.password_env)
-                .hint_text("ILOM_PASSWORD_<NAME> is used by default")
-                .desired_width(f32::INFINITY),
-        );
+        if form.kind == TargetKind::Address {
+            ui.label("Password (optional)");
+            ui.add(
+                egui::TextEdit::singleline(&mut form.password)
+                    .password(true)
+                    .hint_text(match manage.saved_password {
+                        Some(true) => "A password is saved: leave empty to keep it",
+                        _ => "Not written to hosts.toml",
+                    })
+                    .desired_width(f32::INFINITY),
+            );
+            if !form.password.is_empty() {
+                let mut save = !form.skip_keyring;
+                ui.checkbox(&mut save, "Save to the OS keyring");
+                form.skip_keyring = !save;
+            }
+            if form.original.is_some() {
+                ui.horizontal(|ui| match manage.saved_password {
+                    Some(true) => {
+                        ui.small("A password is saved in the OS keyring.");
+                        if ui.small_button("Forget saved password").clicked() {
+                            action = form.original.clone().map(Action::Forget);
+                        }
+                    }
+                    Some(false) => {
+                        ui.small("No password saved in the OS keyring.");
+                    }
+                    None => {
+                        ui.small("The OS keyring could not be read.");
+                    }
+                });
+            }
+        }
+        egui::CollapsingHeader::new("Advanced")
+            .id_salt(("host-advanced", form.original.clone()))
+            .default_open(!form.password_env.is_empty())
+            .show(ui, |ui| {
+                ui.label("Password variable (optional)");
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.password_env)
+                        .hint_text("ILOM_PASSWORD_<NAME> is used by default")
+                        .desired_width(f32::INFINITY),
+                );
+            });
         ui.add_space(4.0);
         ui.small(
             "Settings for ilom-vnc and ilom-mcp (listen, media_dir, \
@@ -823,5 +916,120 @@ mod tests {
             ui.password_lookup(&none),
             Some(PasswordLookup::Found(PasswordOrigin::Keyring))
         );
+    }
+
+    fn file_with(name: &str, text: &str) -> (PathBuf, HostsFile) {
+        let path = scratch(name);
+        fs::write(&path, text).unwrap();
+        let file = HostsFile::load(&path).unwrap();
+        (path, file)
+    }
+
+    #[test]
+    fn saving_with_a_password_stores_it_in_the_keyring_only() {
+        let path = scratch("pw-new");
+        let store = MemoryStore::new();
+        let form = HostForm {
+            name: "rack1".into(),
+            host: "h".into(),
+            password: "secret".into(),
+            ..HostForm::default()
+        };
+        let saved = apply_save(&path, &HostsFile::default(), &form, &store).unwrap();
+        assert_eq!(saved.warning, None);
+        assert_eq!(store.get("rack1").unwrap().as_deref(), Some("secret"));
+        assert!(!fs::read_to_string(&path).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn empty_password_leaves_the_entry_alone() {
+        let (path, file) = file_with("pw-empty", "[hosts.a]\nhost = \"h\"\n");
+        let store = MemoryStore::with(&[("a", "old")]);
+        let form = HostForm::from_host("a", &file.hosts["a"]);
+        apply_save(&path, &file, &form, &store).unwrap();
+        assert_eq!(store.get("a").unwrap().as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn unticked_box_stores_nothing() {
+        let path = scratch("pw-skip");
+        let store = MemoryStore::new();
+        let form = HostForm {
+            name: "a".into(),
+            host: "h".into(),
+            password: "secret".into(),
+            skip_keyring: true,
+            ..HostForm::default()
+        };
+        apply_save(&path, &HostsFile::default(), &form, &store).unwrap();
+        assert_eq!(store.get("a").unwrap(), None);
+    }
+
+    #[test]
+    fn rename_moves_then_a_new_password_replaces() {
+        let (path, file) = file_with("pw-rename", "[hosts.a]\nhost = \"h\"\n");
+        let store = MemoryStore::with(&[("a", "old")]);
+        let mut form = HostForm::from_host("a", &file.hosts["a"]);
+        form.name = "b".into();
+        apply_save(&path, &file, &form, &store).unwrap();
+        assert_eq!(store.get("a").unwrap(), None);
+        assert_eq!(store.get("b").unwrap().as_deref(), Some("old"));
+
+        let file = HostsFile::load(&path).unwrap();
+        let mut form = HostForm::from_host("b", &file.hosts["b"]);
+        form.password = "new".into();
+        apply_save(&path, &file, &form, &store).unwrap();
+        assert_eq!(store.get("b").unwrap().as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn failing_keyring_still_saves_the_host() {
+        let path = scratch("pw-fail");
+        let form = HostForm {
+            name: "a".into(),
+            host: "h".into(),
+            password: "secret".into(),
+            ..HostForm::default()
+        };
+        let saved =
+            apply_save(&path, &HostsFile::default(), &form, &MemoryStore::failing()).unwrap();
+        assert!(
+            saved
+                .warning
+                .unwrap()
+                .contains("password could not be saved")
+        );
+        assert_eq!(
+            HostsFile::load(&path).unwrap().hosts["a"].host.as_deref(),
+            Some("h")
+        );
+    }
+
+    #[test]
+    fn jnlp_hosts_take_no_password() {
+        let path = scratch("pw-jnlp");
+        let store = MemoryStore::new();
+        let form = HostForm {
+            name: "j".into(),
+            kind: TargetKind::Jnlp,
+            jnlp: "/tmp/a.jnlp".into(),
+            password: "secret".into(),
+            ..HostForm::default()
+        };
+        apply_save(&path, &HostsFile::default(), &form, &store).unwrap();
+        assert_eq!(store.get("j").unwrap(), None);
+    }
+
+    #[test]
+    fn password_env_survives_a_save() {
+        let (path, file) = file_with(
+            "pw-env",
+            "[hosts.a]\nhost = \"h\"\npassword_env = \"MY_PW\"\n",
+        );
+        let form = HostForm::from_host("a", &file.hosts["a"]);
+        assert_eq!(form.password_env, "MY_PW");
+        apply_save(&path, &file, &form, &MemoryStore::new()).unwrap();
+        let saved = HostsFile::load(&path).unwrap();
+        assert_eq!(saved.hosts["a"].password_env.as_deref(), Some("MY_PW"));
     }
 }

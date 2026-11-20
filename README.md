@@ -51,7 +51,11 @@ remembered. The password comes from the environment (`password_env`,
 [Several ILOMs](#several-iloms)); the form asks for it only when neither has
 one. Tick **Save password to the OS keyring** and it is stored once the login
 succeeds. A saved password the ILOM rejects is deleted so you can type a new
-one. **Manage hosts…** (with a **Forget password** button per host) adds, edits and removes
+one. **Manage hosts…** (the Add and Edit dialog has a masked Password field with
+**Save to the OS keyring**, a **Forget saved password** button, and an
+**Advanced** section for the password variable; the password never goes into
+`hosts.toml`, an empty field keeps the saved one, and a keyring failure only
+warns after the host is saved; the list also has **Forget password**) adds, edits and removes
 entries. Saving keeps comments and the `listen`, `media_dir` and
 `allow_writable_media` keys that the viewer does not edit. **Custom** keeps the
 manual address entry. `--name` preselects a host (and `--auto` connects to it);
