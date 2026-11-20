@@ -2,11 +2,17 @@
 //! remove entries of `hosts.toml`. The state and the decisions are plain
 //! functions (tested below); only `HostsUi::show_*` draws.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, mpsc},
+    thread,
+    time::Duration,
+};
 
 use eframe::egui::{self, Color32};
 use ilom_kvm_core::{
-    hosts::{Env, Host, HostsFile, MissingPassword, PasswordOrigin},
+    hosts::{Env, Host, HostsFile, MissingPassword, PasswordOrigin, env_suffix},
     keymap::Layout,
     keyring::{SecretStore, move_entry},
     session::Source,
@@ -39,6 +45,8 @@ pub struct HostForm {
     pub password: String,
     /// "Save to the OS keyring" unticked (the box is on by default).
     pub skip_keyring: bool,
+    /// "Forget saved password" asked in the dialog; applied on Save only.
+    pub forget_saved: bool,
 }
 
 impl HostForm {
@@ -127,11 +135,18 @@ pub fn apply_save(
     file: &HostsFile,
     form: &HostForm,
     store: &dyn SecretStore,
+    env: Env,
 ) -> Result<Saved, String> {
     let (name, host) = form.to_host()?;
     check_name(file, form.original.as_deref(), &name)?;
     let render = |error: anyhow::Error| format!("{error:#}");
     let mut warning = None;
+    let mut warn = |message: String| {
+        warning = Some(match warning.take() {
+            Some(earlier) => format!("{earlier}; {message}"),
+            None => message,
+        });
+    };
     if let Some(original) = form
         .original
         .as_deref()
@@ -139,26 +154,65 @@ pub fn apply_save(
     {
         HostsFile::rename_host(path, original, &name).map_err(render)?;
         if let Err(error) = move_entry(store, original, &name) {
-            warning = Some(format!(
+            warn(format!(
                 "Renamed, but the saved password could not be moved: {error:#}"
             ));
         }
     }
     HostsFile::save_host(path, &name, &host).map_err(render)?;
-    // The host is saved whatever happens to the password. An empty field
-    // leaves any existing entry alone; a JNLP host has no password.
-    if !form.password.is_empty()
-        && !form.skip_keyring
-        && host.jnlp.is_none()
-        && let Err(error) = store.set(&name, &form.password)
-    {
-        let message = format!("Host saved, but the password could not be saved: {error:#}");
-        warning = Some(match warning {
-            Some(earlier) => format!("{earlier}; {message}"),
-            None => message,
-        });
+    // The host is saved whatever happens to the password.
+    if host.jnlp.is_some() {
+        // A JNLP host has no password: drop the entry of an address host
+        // that became one. The typed password is ignored.
+        let was_address = form
+            .original
+            .as_deref()
+            .and_then(|original| file.hosts.get(original))
+            .is_some_and(|before| before.jnlp.is_none());
+        if was_address && let Err(error) = store.delete(&name) {
+            warn(format!(
+                "Host saved, but its saved password could not be removed: {error:#}"
+            ));
+        }
+    } else {
+        if form.forget_saved
+            && let Err(error) = store.delete(&name)
+        {
+            warn(format!(
+                "Host saved, but the saved password could not be forgotten: {error:#}"
+            ));
+        }
+        if !form.password.is_empty() && !form.skip_keyring {
+            match store.set(&name, &form.password) {
+                Ok(()) => {
+                    if let Some(variable) = env_precedence(&name, &host, env) {
+                        warn(format!(
+                            "environment variable {variable} takes precedence; the saved \
+                             password will not be used while it is set"
+                        ));
+                    }
+                }
+                Err(error) => warn(format!(
+                    "Host saved, but the password could not be saved: {error:#}"
+                )),
+            }
+        }
     }
     Ok(Saved { name, warning })
+}
+
+/// The environment variable that would win over the keyring for this host,
+/// if one is set.
+pub fn env_precedence(name: &str, host: &Host, env: Env) -> Option<String> {
+    let mut variables = Vec::new();
+    if let Some(variable) = &host.password_env {
+        variables.push(variable.clone());
+    }
+    variables.push(format!("ILOM_PASSWORD_{}", env_suffix(name)));
+    variables.push("ILOM_PASSWORD".to_owned());
+    variables
+        .into_iter()
+        .find(|variable| env(variable).is_some_and(|value| !value.is_empty()))
 }
 
 /// What picking a host puts in the login form.
@@ -320,6 +374,77 @@ pub fn show_switcher(
     picked.filter(|name| current != Some(name.as_str()))
 }
 
+/// Result of a keyring call made off the UI thread.
+pub struct Job<T>(mpsc::Receiver<T>);
+
+pub enum JobPoll<T> {
+    Pending,
+    Ready(T),
+    /// The worker died without answering.
+    Lost,
+}
+
+impl<T: Send + 'static> Job<T> {
+    pub fn spawn(work: impl FnOnce() -> T + Send + 'static) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let spawned = thread::Builder::new()
+            .name("ilom-keyring-ui".into())
+            .spawn(move || {
+                let _ = sender.send(work());
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "could not start a keyring thread");
+        }
+        Self(receiver)
+    }
+
+    pub fn poll(&self) -> JobPoll<T> {
+        match self.0.try_recv() {
+            Ok(value) => JobPoll::Ready(value),
+            Err(mpsc::TryRecvError::Empty) => JobPoll::Pending,
+            Err(mpsc::TryRecvError::Disconnected) => JobPoll::Lost,
+        }
+    }
+}
+
+/// Whether the edited host has a keyring entry, found off the UI thread
+/// once per form opening.
+#[derive(Default)]
+pub enum SavedState {
+    /// Not asked (a new host).
+    #[default]
+    Unknown,
+    Checking(Job<Option<bool>>),
+    Saved,
+    Empty,
+    /// The keyring failed or did not answer.
+    Unreadable,
+}
+
+impl SavedState {
+    pub fn check(store: Arc<dyn SecretStore>, name: &str) -> Self {
+        let name = name.to_owned();
+        Self::Checking(Job::spawn(move || {
+            store.get(&name).ok().map(|saved| saved.is_some())
+        }))
+    }
+
+    pub fn is_checking(&self) -> bool {
+        matches!(self, Self::Checking(_))
+    }
+
+    /// Moves `Checking` to its outcome once the worker has answered.
+    pub fn poll(&mut self) {
+        let Self::Checking(job) = self else { return };
+        *self = match job.poll() {
+            JobPoll::Pending => return,
+            JobPoll::Ready(Some(true)) => Self::Saved,
+            JobPoll::Ready(Some(false)) => Self::Empty,
+            JobPoll::Ready(None) | JobPoll::Lost => Self::Unreadable,
+        };
+    }
+}
+
 #[derive(Default)]
 struct Manage {
     editing: Option<HostForm>,
@@ -329,7 +454,9 @@ struct Manage {
     notice: Option<String>,
     /// Whether the edited host has a keyring entry, asked once when the
     /// form opens (never per frame).
-    saved_password: Option<bool>,
+    saved: SavedState,
+    /// A list-view "Forget password" in flight: host and result.
+    forgetting: Option<(String, Job<Result<(), String>>)>,
 }
 
 /// Hosts file, picker selection and dialog state of the login screen.
@@ -511,6 +638,31 @@ impl HostsUi {
         let Some(mut manage) = self.manage.take() else {
             return;
         };
+        manage.saved.poll();
+        if let Some((name, job)) = &manage.forgetting {
+            match job.poll() {
+                JobPoll::Pending => {}
+                done => {
+                    let name = name.clone();
+                    self.lookups.remove(&name);
+                    match done {
+                        JobPoll::Ready(Ok(())) => {
+                            manage.notice = Some(format!("Saved password of {name} forgotten"));
+                        }
+                        JobPoll::Ready(Err(error)) => {
+                            manage.error = Some(format!("Could not forget the password: {error}"));
+                        }
+                        _ => {
+                            manage.error = Some("The keyring did not answer".into());
+                        }
+                    }
+                    manage.forgetting = None;
+                }
+            }
+        }
+        if manage.saved.is_checking() || manage.forgetting.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         let mut action = None;
         let modal = egui::Modal::new(egui::Id::new("manage-hosts"))
             .backdrop_color(Color32::from_black_alpha(200))
@@ -536,13 +688,13 @@ impl HostsUi {
             Some(Action::Add) => {
                 manage.error = None;
                 manage.notice = None;
-                manage.saved_password = None;
+                manage.saved = SavedState::Unknown;
                 manage.editing = Some(HostForm::default());
             }
             Some(Action::Edit(name)) => {
                 manage.error = None;
                 manage.notice = None;
-                manage.saved_password = self.store.get(&name).ok().map(|saved| saved.is_some());
+                manage.saved = SavedState::check(self.store.clone(), &name);
                 manage.editing = self
                     .file
                     .hosts
@@ -551,25 +703,15 @@ impl HostsUi {
             }
             Some(Action::Delete(name)) => manage.confirm_delete = Some(name),
             Some(Action::Forget(name)) => {
-                manage.error = None;
+                // Only the list asks for an immediate forget: leave any
+                // other message of the dialog alone.
                 manage.notice = None;
-                match self.store.delete(&name) {
-                    Ok(()) => {
-                        self.lookups.remove(&name);
-                        manage.notice = Some(format!("Saved password of {name} forgotten"));
-                        if manage
-                            .editing
-                            .as_ref()
-                            .and_then(|form| form.original.as_deref())
-                            == Some(name.as_str())
-                        {
-                            manage.saved_password = Some(false);
-                        }
-                    }
-                    Err(error) => {
-                        manage.error = Some(format!("Could not forget the password: {error:#}"));
-                    }
-                }
+                let store = self.store.clone();
+                let target = name.clone();
+                manage.forgetting = Some((
+                    name,
+                    Job::spawn(move || store.delete(&target).map_err(|error| format!("{error:#}"))),
+                ));
             }
             Some(Action::CancelDelete) => manage.confirm_delete = None,
             Some(Action::ConfirmDelete(name)) => {
@@ -595,7 +737,8 @@ impl HostsUi {
             }
             Some(Action::Save) => {
                 if let Some(form) = manage.editing.clone() {
-                    match apply_save(&path, &self.file, &form, self.store.as_ref()) {
+                    let env = |key: &str| std::env::var(key).ok();
+                    match apply_save(&path, &self.file, &form, self.store.as_ref(), &env) {
                         Ok(saved) => {
                             self.changed.extend(form.original.clone());
                             self.changed.push(saved.name.clone());
@@ -727,30 +870,45 @@ impl HostsUi {
             ui.add(
                 egui::TextEdit::singleline(&mut form.password)
                     .password(true)
-                    .hint_text(match manage.saved_password {
-                        Some(true) => "A password is saved: leave empty to keep it",
+                    .hint_text(match manage.saved {
+                        SavedState::Saved => "A password is saved: leave empty to keep it",
                         _ => "Not written to hosts.toml",
                     })
                     .desired_width(f32::INFINITY),
             );
-            if !form.password.is_empty() {
-                let mut save = !form.skip_keyring;
-                ui.checkbox(&mut save, "Save to the OS keyring");
-                form.skip_keyring = !save;
+            let mut save = !form.skip_keyring;
+            ui.checkbox(&mut save, "Save to the OS keyring");
+            form.skip_keyring = !save;
+            if form.skip_keyring && !form.password.is_empty() {
+                ui.small("Password will not be stored");
             }
             if form.original.is_some() {
-                ui.horizontal(|ui| match manage.saved_password {
-                    Some(true) => {
-                        ui.small("A password is saved in the OS keyring.");
-                        if ui.small_button("Forget saved password").clicked() {
-                            action = form.original.clone().map(Action::Forget);
+                ui.horizontal(|ui| {
+                    if form.forget_saved {
+                        ui.small("The saved password will be forgotten on save.");
+                        if ui.small_button("Undo").clicked() {
+                            form.forget_saved = false;
                         }
+                        return;
                     }
-                    Some(false) => {
-                        ui.small("No password saved in the OS keyring.");
-                    }
-                    None => {
-                        ui.small("The OS keyring could not be read.");
+                    match manage.saved {
+                        SavedState::Checking(_) => {
+                            ui.spinner();
+                            ui.small("Checking the keyring…");
+                        }
+                        SavedState::Saved => {
+                            ui.small("A password is saved in the OS keyring.");
+                            if ui.small_button("Forget saved password").clicked() {
+                                form.forget_saved = true;
+                            }
+                        }
+                        SavedState::Empty => {
+                            ui.small("No password saved in the OS keyring.");
+                        }
+                        SavedState::Unreadable => {
+                            ui.small("The OS keyring could not be read.");
+                        }
+                        SavedState::Unknown => {}
                     }
                 });
             }
@@ -982,7 +1140,7 @@ mod tests {
         form.name = "b".into();
         form.host = "i".into();
         let store = MemoryStore::with(&[("a", "pw")]);
-        let saved = apply_save(&path, &file, &form, &store).unwrap();
+        let saved = apply_save(&path, &file, &form, &store, &env_of(&[])).unwrap();
         assert_eq!((saved.name.as_str(), saved.warning), ("b", None));
         // The saved password follows the rename.
         assert_eq!(store.get("a").unwrap(), None);
@@ -997,9 +1155,14 @@ mod tests {
             host: "x".into(),
             ..HostForm::default()
         };
-        assert!(apply_save(&path, &saved, &clash, &store).is_err());
+        assert!(apply_save(&path, &saved, &clash, &store, &env_of(&[])).is_err());
         clash.name = "c".into();
-        assert_eq!(apply_save(&path, &saved, &clash, &store).unwrap().name, "c");
+        assert_eq!(
+            apply_save(&path, &saved, &clash, &store, &env_of(&[]))
+                .unwrap()
+                .name,
+            "c"
+        );
     }
 
     #[test]
@@ -1028,7 +1191,7 @@ mod tests {
         let file = HostsFile::load(&path).unwrap();
         let mut form = HostForm::from_host("a", &file.hosts["a"]);
         form.name = "b".into();
-        let saved = apply_save(&path, &file, &form, &MemoryStore::failing()).unwrap();
+        let saved = apply_save(&path, &file, &form, &MemoryStore::failing(), &env_of(&[])).unwrap();
         assert_eq!(saved.name, "b");
         assert!(saved.warning.is_some());
         assert!(HostsFile::load(&path).unwrap().hosts.contains_key("b"));
@@ -1075,7 +1238,7 @@ mod tests {
             password: "secret".into(),
             ..HostForm::default()
         };
-        let saved = apply_save(&path, &HostsFile::default(), &form, &store).unwrap();
+        let saved = apply_save(&path, &HostsFile::default(), &form, &store, &env_of(&[])).unwrap();
         assert_eq!(saved.warning, None);
         assert_eq!(store.get("rack1").unwrap().as_deref(), Some("secret"));
         assert!(!fs::read_to_string(&path).unwrap().contains("secret"));
@@ -1086,7 +1249,7 @@ mod tests {
         let (path, file) = file_with("pw-empty", "[hosts.a]\nhost = \"h\"\n");
         let store = MemoryStore::with(&[("a", "old")]);
         let form = HostForm::from_host("a", &file.hosts["a"]);
-        apply_save(&path, &file, &form, &store).unwrap();
+        apply_save(&path, &file, &form, &store, &env_of(&[])).unwrap();
         assert_eq!(store.get("a").unwrap().as_deref(), Some("old"));
     }
 
@@ -1101,7 +1264,7 @@ mod tests {
             skip_keyring: true,
             ..HostForm::default()
         };
-        apply_save(&path, &HostsFile::default(), &form, &store).unwrap();
+        apply_save(&path, &HostsFile::default(), &form, &store, &env_of(&[])).unwrap();
         assert_eq!(store.get("a").unwrap(), None);
     }
 
@@ -1111,14 +1274,14 @@ mod tests {
         let store = MemoryStore::with(&[("a", "old")]);
         let mut form = HostForm::from_host("a", &file.hosts["a"]);
         form.name = "b".into();
-        apply_save(&path, &file, &form, &store).unwrap();
+        apply_save(&path, &file, &form, &store, &env_of(&[])).unwrap();
         assert_eq!(store.get("a").unwrap(), None);
         assert_eq!(store.get("b").unwrap().as_deref(), Some("old"));
 
         let file = HostsFile::load(&path).unwrap();
         let mut form = HostForm::from_host("b", &file.hosts["b"]);
         form.password = "new".into();
-        apply_save(&path, &file, &form, &store).unwrap();
+        apply_save(&path, &file, &form, &store, &env_of(&[])).unwrap();
         assert_eq!(store.get("b").unwrap().as_deref(), Some("new"));
     }
 
@@ -1131,8 +1294,14 @@ mod tests {
             password: "secret".into(),
             ..HostForm::default()
         };
-        let saved =
-            apply_save(&path, &HostsFile::default(), &form, &MemoryStore::failing()).unwrap();
+        let saved = apply_save(
+            &path,
+            &HostsFile::default(),
+            &form,
+            &MemoryStore::failing(),
+            &env_of(&[]),
+        )
+        .unwrap();
         assert!(
             saved
                 .warning
@@ -1156,7 +1325,7 @@ mod tests {
             password: "secret".into(),
             ..HostForm::default()
         };
-        apply_save(&path, &HostsFile::default(), &form, &store).unwrap();
+        apply_save(&path, &HostsFile::default(), &form, &store, &env_of(&[])).unwrap();
         assert_eq!(store.get("j").unwrap(), None);
     }
 
@@ -1168,7 +1337,7 @@ mod tests {
         );
         let form = HostForm::from_host("a", &file.hosts["a"]);
         assert_eq!(form.password_env, "MY_PW");
-        apply_save(&path, &file, &form, &MemoryStore::new()).unwrap();
+        apply_save(&path, &file, &form, &MemoryStore::new(), &env_of(&[])).unwrap();
         let saved = HostsFile::load(&path).unwrap();
         assert_eq!(saved.hosts["a"].password_env.as_deref(), Some("MY_PW"));
     }
@@ -1300,5 +1469,189 @@ mod tests {
         assert_eq!(ui.take_changed(), ["a"]);
         assert!(ui.take_changed().is_empty());
         let _ = path;
+    }
+
+    fn saved_form(file: &HostsFile, name: &str) -> HostForm {
+        HostForm::from_host(name, &file.hosts[name])
+    }
+
+    #[test]
+    fn env_precedence_warns_but_still_saves() {
+        let (path, file) = file_with(
+            "env-warn",
+            "[hosts.a]\nhost = \"h\"\npassword_env = \"MY_PW\"\n",
+        );
+        let store = MemoryStore::new();
+        let mut form = saved_form(&file, "a");
+        form.password = "typed".into();
+        let env = env_of(&[("MY_PW", "fromenv")]);
+        let saved = apply_save(&path, &file, &form, &store, &env).unwrap();
+        assert_eq!(store.get("a").unwrap().as_deref(), Some("typed"));
+        let warning = saved.warning.unwrap();
+        assert!(
+            warning.contains("MY_PW") && warning.contains("takes precedence"),
+            "{warning}"
+        );
+
+        // No variable set: no warning.
+        let saved = apply_save(&path, &file, &form, &store, &env_of(&[])).unwrap();
+        assert_eq!(saved.warning, None);
+        // The global variable counts too.
+        let env = env_of(&[("ILOM_PASSWORD", "x")]);
+        let saved = apply_save(&path, &file, &form, &store, &env).unwrap();
+        assert!(saved.warning.unwrap().contains("ILOM_PASSWORD"));
+    }
+
+    #[test]
+    fn address_to_jnlp_removes_the_stale_entry() {
+        let (path, file) = file_with("to-jnlp", "[hosts.a]\nhost = \"h\"\n");
+        let store = MemoryStore::with(&[("a", "old")]);
+        let mut form = saved_form(&file, "a");
+        form.kind = TargetKind::Jnlp;
+        form.jnlp = "/tmp/a.jnlp".into();
+        form.password = "ignored".into();
+        let saved = apply_save(&path, &file, &form, &store, &env_of(&[])).unwrap();
+        assert_eq!(saved.warning, None);
+        assert_eq!(store.get("a").unwrap(), None);
+
+        // A failing keyring warns, and the host is still saved as JNLP.
+        let (path, file) = file_with("to-jnlp-fail", "[hosts.a]\nhost = \"h\"\n");
+        let saved = apply_save(&path, &file, &form, &MemoryStore::failing(), &env_of(&[])).unwrap();
+        assert!(saved.warning.unwrap().contains("could not be removed"));
+        assert!(HostsFile::load(&path).unwrap().hosts["a"].jnlp.is_some());
+    }
+
+    #[test]
+    fn forget_is_applied_on_save_only() {
+        let (path, file) = file_with("forget", "[hosts.a]\nhost = \"h\"\n");
+        let store = MemoryStore::with(&[("a", "old")]);
+        let mut form = saved_form(&file, "a");
+        // Marking it changes nothing until the form is saved.
+        form.forget_saved = true;
+        assert_eq!(store.get("a").unwrap().as_deref(), Some("old"));
+        apply_save(&path, &file, &form, &store, &env_of(&[])).unwrap();
+        assert_eq!(store.get("a").unwrap(), None);
+
+        // Forget plus a new password replaces the entry.
+        store.set("a", "old").unwrap();
+        form.password = "new".into();
+        apply_save(&path, &file, &form, &store, &env_of(&[])).unwrap();
+        assert_eq!(store.get("a").unwrap().as_deref(), Some("new"));
+
+        // Undo (or Cancel, which never reaches apply_save) leaves it alone.
+        form.forget_saved = false;
+        form.password.clear();
+        apply_save(&path, &file, &form, &store, &env_of(&[])).unwrap();
+        assert_eq!(store.get("a").unwrap().as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn forget_with_a_failing_keyring_warns_and_saves() {
+        let (path, file) = file_with("forget-fail", "[hosts.a]\nhost = \"h2\"\n");
+        let mut form = saved_form(&file, "a");
+        form.forget_saved = true;
+        let saved = apply_save(&path, &file, &form, &MemoryStore::failing(), &env_of(&[])).unwrap();
+        assert!(saved.warning.unwrap().contains("could not be forgotten"));
+    }
+
+    #[test]
+    fn keyring_choice_is_kept_in_the_form_state() {
+        // The checkbox is bound to `skip_keyring`, which is independent of
+        // the password text: clearing and retyping the field keeps it.
+        let mut form = HostForm {
+            name: "a".into(),
+            host: "h".into(),
+            skip_keyring: true,
+            ..HostForm::default()
+        };
+        form.password = "x".into();
+        form.password.clear();
+        form.password = "y".into();
+        assert!(form.skip_keyring);
+        let path = scratch("choice");
+        let store = MemoryStore::new();
+        apply_save(&path, &HostsFile::default(), &form, &store, &env_of(&[])).unwrap();
+        assert_eq!(store.get("a").unwrap(), None);
+        assert!(!HostForm::default().skip_keyring, "ticked by default");
+    }
+
+    /// A store whose reads take a while, like a locked keyring.
+    struct SlowStore(MemoryStore, Duration);
+
+    impl SecretStore for SlowStore {
+        fn get(&self, name: &str) -> anyhow::Result<Option<String>> {
+            thread::sleep(self.1);
+            self.0.get(name)
+        }
+        fn set(&self, name: &str, password: &str) -> anyhow::Result<()> {
+            self.0.set(name, password)
+        }
+        fn delete(&self, name: &str) -> anyhow::Result<()> {
+            thread::sleep(self.1);
+            self.0.delete(name)
+        }
+    }
+
+    fn settle(state: &mut SavedState) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while state.is_checking() && std::time::Instant::now() < deadline {
+            state.poll();
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn keyring_check_runs_off_the_calling_thread() {
+        let slow = |entries: &[(&str, &str)]| {
+            Arc::new(SlowStore(
+                MemoryStore::with(entries),
+                Duration::from_millis(300),
+            )) as Arc<dyn SecretStore>
+        };
+        let started = std::time::Instant::now();
+        let mut state = SavedState::check(slow(&[("a", "pw")]), "a");
+        // Returns at once and is pending until the worker answers.
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(state.is_checking());
+        state.poll();
+        assert!(state.is_checking());
+        settle(&mut state);
+        assert!(matches!(state, SavedState::Saved));
+
+        let mut state = SavedState::check(slow(&[]), "a");
+        settle(&mut state);
+        assert!(matches!(state, SavedState::Empty));
+
+        let failing: Arc<dyn SecretStore> = Arc::new(MemoryStore::failing());
+        let mut state = SavedState::check(failing, "a");
+        settle(&mut state);
+        assert!(matches!(state, SavedState::Unreadable));
+
+        // Polling a settled or unknown state changes nothing.
+        let mut state = SavedState::Unknown;
+        state.poll();
+        assert!(matches!(state, SavedState::Unknown));
+    }
+
+    #[test]
+    fn forget_job_reports_asynchronously() {
+        let store = Arc::new(SlowStore(
+            MemoryStore::with(&[("a", "pw")]),
+            Duration::from_millis(200),
+        ));
+        let worker = store.clone();
+        let job = Job::spawn(move || worker.delete("a").map_err(|error| format!("{error:#}")));
+        assert!(matches!(job.poll(), JobPoll::Pending));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let result = loop {
+            match job.poll() {
+                JobPoll::Pending if std::time::Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                other => break other,
+            }
+        };
+        assert!(matches!(result, JobPoll::Ready(Ok(()))));
+        assert_eq!(store.0.get("a").unwrap(), None);
     }
 }

@@ -338,3 +338,18 @@ environment or the keyring, and a third entry using `jnlp`.
       (reconnecting shows no stale image).
 - [ ] Nothing is written to disk for the cache (no image files in the config
       or temp directories).
+- [ ] In the Add/Edit dialog the **Save to the OS keyring** box is always shown
+      with the password field, ticked by default; unticked with a typed
+      password it says "Password will not be stored", and the choice survives
+      clearing and retyping the password.
+- [ ] **Forget saved password** in the edit form only marks it ("will be
+      forgotten on save", with Undo): Cancel leaves the entry, Save removes it;
+      validation errors stay visible meanwhile.
+- [ ] Saving a typed password for a host whose password variable is set shows
+      a yellow notice that the variable takes precedence; the entry is still
+      saved.
+- [ ] Changing an address host to a JNLP file and saving removes its keyring
+      entry.
+- [ ] Opening Edit never freezes the window, even with a locked keyring: the
+      form shows "Checking the keyring…" and then the saved/none state; the
+      list's **Forget password** also returns at once and reports afterwards.
