@@ -148,6 +148,69 @@ A JNLP secret works **once**. With web credentials, every connection (and
 every reconnect) mints a fresh JNLP and then closes the web session straight
 away, because the ILOM has only a few web session slots.
 
+## MCP server
+
+`ilom-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server on stdio, so an LLM agent can see the host console, type, click and
+mount virtual media.
+
+```sh
+cargo build --release -p ilom-mcp
+claude mcp add ilom --env ILOM_HOST=10.0.0.5 --env ILOM_PASSWORD=... -- \
+  /path/to/target/release/ilom-mcp --layout fr --media-dir ~/isos
+```
+
+Other clients take the same command in their JSON configuration:
+
+```json
+{
+  "mcpServers": {
+    "ilom": {
+      "command": "/path/to/ilom-mcp",
+      "args": ["--layout", "fr", "--media-dir", "/home/me/isos"],
+      "env": { "ILOM_HOST": "10.0.0.5", "ILOM_PASSWORD": "..." }
+    }
+  }
+}
+```
+
+Options are those of `ilom-vnc` without `--listen`: `--host`, `--user`,
+`--jnlp` (wins over `--host` and `ILOM_HOST`), `--layout` and `--idle-timeout`
+(default 60 s), with `ILOM_*` read from the environment or `.env`. Two more
+control `mount_media`: `--media-dir` (`ILOM_MCP_MEDIA_DIR`) and
+`--allow-writable-media` (`ILOM_MCP_ALLOW_WRITABLE_MEDIA`). Logs go to stderr,
+because stdout carries the protocol.
+
+Tools:
+
+- `screenshot`: the host screen as a PNG, with the connection state in the
+  text. A reconnecting console shows its last picture, and the text then says
+  it may be old. A host that sends no video gives a text answer instead.
+- `type_text`: types text through the host layout.
+- `send_keys`: key presses with modifiers, for example `ctrl`+`alt`+`delete`.
+- `mouse`: `move`, `click` or `double` at pixel coordinates of the latest
+  screenshot, with the left, right or middle button. Pass `expected_width` and
+  `expected_height` (the screenshot size) to fail instead of clicking the wrong
+  place after a resolution change. The result states the screen size.
+- `status`: connection state, keyboard LEDs and the virtual media drives.
+- `mount_media` and `unmount_media`: attach an ISO (`cdrom`) or a raw image
+  (`floppy`) from `--media-dir`. Mounting is refused without that option,
+  for paths outside it (symlinks are resolved first), and for `writable`
+  unless `--allow-writable-media` is set.
+
+Limits: the first call takes about 10 s (it opens the console session). The
+session closes after `--idle-timeout` seconds without calls, except while
+media is mounted. Input tools run one at a time. A `type_text` that times out
+is cancelled, but keys already queued cannot be recalled. The mouse wheel is not supported (the SP's reports have
+none), nor is relative mouse mode. There is no power control and no text
+recognition: the agent reads the screenshots itself.
+
+Security: the server runs with your ILOM credentials and gives the agent full
+control of the host console, including login prompts. `mount_media` lets the
+agent expose any file below `--media-dir` to the host, so keep that directory
+to images you are happy to share, and enable writable media only if needed. Register it only in clients and projects you
+trust, and keep the ILOM credentials out of shared configuration files.
+
 ## How it works
 
 The repository is a Cargo workspace:
@@ -158,6 +221,9 @@ The repository is a Cargo workspace:
 - `crates/ilom-vnc`: the VNC bridge (`rfb.rs` wire format and encodings,
   `keys.rs` keysym and scancode mapping, `hub.rs` shared session, `client.rs`
   per-client connection).
+- `crates/ilom-mcp`: the MCP server (`console.rs` blocking session operations
+  on the VNC bridge's `Hub`, `tools.rs` the tools, `keys.rs` key names to USB
+  usages). It is the only crate that uses `tokio`.
 
 Main modules of `ilom-kvm-core`:
 

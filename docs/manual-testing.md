@@ -198,3 +198,33 @@ Wrong password (only with care: repeated failures may lock the account):
       with it, the client asks for the password and rejects a wrong one.
 - [ ] A wrong `ILOM_PASSWORD`: the client shows the login error, and later
       clients get the same error without a new web login.
+
+## MCP server
+
+- [ ] `claude mcp add ilom -- ilom-mcp` (with `ILOM_*` in the environment):
+      `/mcp` shows the server connected with 7 tools.
+- [ ] `screenshot` returns the host screen after about 10 s; stderr shows the
+      session starting and stdout carries only protocol messages.
+- [ ] `screenshot` of a powered-off host answers that the screen is blank.
+- [ ] `type_text` with `a1@ê` on a French host (`--layout fr`) types the same
+      characters on the host.
+- [ ] `send_keys` with `ctrl`+`alt` and `delete` reaches the host (login
+      screen, or the reboot prompt on a Linux console); `f2` enters the BIOS
+      setup at boot; an unknown key name gives a tool error.
+- [ ] `mouse` `move`, `click` and `double` land on the pixel seen in the
+      screenshot; a point outside the screen gives a tool error.
+- [ ] `status` shows the connection state, the LEDs (toggle Caps Lock with
+      `send_keys` and see it change) and empty drives.
+- [ ] `mount_media` with an ISO on `cdrom`: the host sees the drive and boots
+      it; `status` shows it active. The session stays open past
+      `--idle-timeout` while it is mounted.
+- [ ] `mount_media` with a missing path or a non-ISO file gives a tool error;
+      without `--media-dir`, a path outside it, a symlink leaving it, or
+      `writable` without `--allow-writable-media` is refused.
+- [ ] `--jnlp file` works with `ILOM_HOST` set in `.env`.
+- [ ] Dropping the console connection (cable pull or SP reset): `screenshot`
+      warns that the picture may be old.
+- [ ] `unmount_media` releases the drive; after `--idle-timeout` seconds the
+      log shows the ILOM session closing.
+- [ ] A wrong `ILOM_PASSWORD`: tools return the login error, and later calls
+      get the same error without a new web login.
