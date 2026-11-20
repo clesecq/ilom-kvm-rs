@@ -30,7 +30,7 @@ use crate::{
 };
 
 /// Where launch parameters come from.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     /// Log into the ILOM web UI and mint a fresh JNLP (supports reconnects).
     Web {

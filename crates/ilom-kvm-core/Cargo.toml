@@ -20,5 +20,6 @@ sha2 = "0.11.0"
 socket2 = { version = "0.6", features = ["all"] }
 thiserror = "2.0"
 toml.workspace = true
+toml_edit.workspace = true
 tracing.workspace = true
 wasmi = "2.0"

@@ -14,11 +14,13 @@
 
 use std::{
     collections::BTreeMap,
+    fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
+use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::{config, keymap::Layout, session::Source};
 
@@ -47,6 +49,20 @@ pub struct Host {
 pub struct HostsFile {
     #[serde(default)]
     pub hosts: BTreeMap<String, Host>,
+}
+
+/// No password for a web host: none of the variables is set. Front ends
+/// with a keyboard can prompt instead of failing (downcast the error from
+/// [`Host::source`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "no ILOM password for host {name:?}: set {variable} (or ILOM_PASSWORD) in the environment \
+     or .env"
+)]
+pub struct MissingPassword {
+    pub name: String,
+    /// The per-host variable to set.
+    pub variable: String,
 }
 
 /// Parses a layout id such as `us` or `fr`, listing the valid ones on error.
@@ -101,8 +117,127 @@ impl HostsFile {
     }
 }
 
+impl HostsFile {
+    /// Creates or updates `[hosts.<name>]`, setting only the keys the GUI
+    /// owns (`host`/`jnlp`, `user`, `layout`, `password_env`). Other keys,
+    /// other hosts and comments stay as they are.
+    pub fn save_host(path: &Path, name: &str, host: &Host) -> Result<()> {
+        host.validate(name)?;
+        let mut document = read_document(path)?;
+        let table = host_table(&mut document, name)?;
+        set_or_remove(table, "host", host.host.as_deref());
+        set_or_remove(
+            table,
+            "jnlp",
+            host.jnlp
+                .as_deref()
+                .map(|path| path.to_string_lossy())
+                .as_deref(),
+        );
+        set_or_remove(table, "user", host.user.as_deref());
+        set_or_remove(table, "layout", host.layout.as_deref());
+        set_or_remove(table, "password_env", host.password_env.as_deref());
+        write_document(path, &document)
+    }
+
+    /// Removes `[hosts.<name>]`; false when there was none.
+    pub fn remove_host(path: &Path, name: &str) -> Result<bool> {
+        let mut document = read_document(path)?;
+        let removed = document
+            .get_mut("hosts")
+            .and_then(Item::as_table_like_mut)
+            .is_some_and(|hosts| hosts.remove(name).is_some());
+        if removed {
+            write_document(path, &document)?;
+        }
+        Ok(removed)
+    }
+
+    /// Renames `[hosts.<old>]`, keeping its keys and comments. Fails when
+    /// `new` exists or `old` does not.
+    pub fn rename_host(path: &Path, old: &str, new: &str) -> Result<()> {
+        if new.trim().is_empty() {
+            bail!("the name must not be empty");
+        }
+        let mut document = read_document(path)?;
+        let hosts = document
+            .get_mut("hosts")
+            .and_then(Item::as_table_like_mut)
+            .ok_or_else(|| anyhow!("no host called {old:?}"))?;
+        if hosts.contains_key(new) {
+            bail!("a host called {new:?} already exists");
+        }
+        let item = hosts
+            .remove(old)
+            .ok_or_else(|| anyhow!("no host called {old:?}"))?;
+        hosts.insert(new, item);
+        write_document(path, &document)
+    }
+}
+
+fn read_document(path: &Path) -> Result<DocumentMut> {
+    match fs::read_to_string(path) {
+        Ok(text) => text
+            .parse()
+            .with_context(|| format!("parse {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(DocumentMut::new()),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// `[hosts.<name>]`, created (with an implicit `[hosts]`) when missing.
+fn host_table<'a>(document: &'a mut DocumentMut, name: &str) -> Result<&'a mut Table> {
+    if !document.contains_key("hosts") {
+        let mut hosts = Table::new();
+        hosts.set_implicit(true);
+        document.insert("hosts", Item::Table(hosts));
+    }
+    let hosts = document["hosts"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("`hosts` is not a table"))?;
+    if !hosts.contains_key(name) {
+        hosts.insert(name, Item::Table(Table::new()));
+    }
+    hosts[name]
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("host {name:?} is not a table"))
+}
+
+fn set_or_remove(table: &mut Table, key: &str, new: Option<&str>) {
+    match new {
+        Some(new) => {
+            // Keep the existing key's comments when only the value changes.
+            if let Some(Item::Value(old)) = table.get_mut(key) {
+                let decor = old.decor().clone();
+                let mut replacement = value(new);
+                if let Some(replacement) = replacement.as_value_mut() {
+                    *replacement.decor_mut() = decor;
+                }
+                *old = replacement.into_value().expect("a value");
+            } else {
+                table.insert(key, value(new));
+            }
+        }
+        None => {
+            table.remove(key);
+        }
+    }
+}
+
+/// Writes through a temporary file so a crash never leaves half a file.
+fn write_document(path: &Path, document: &DocumentMut) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, document.to_string())
+        .with_context(|| format!("write {}", temporary.display()))?;
+    fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))
+}
+
 impl Host {
-    fn validate(&self, name: &str) -> Result<()> {
+    /// Checks the name and the fields the GUI edits.
+    pub fn validate(&self, name: &str) -> Result<()> {
         if name.trim().is_empty() {
             bail!("the name must not be empty");
         }
@@ -142,12 +277,9 @@ impl Host {
         let password = candidates
             .iter()
             .find_map(|variable| env(variable).filter(|value| !value.is_empty()))
-            .ok_or_else(|| {
-                anyhow!(
-                    "no ILOM password for host {name:?}: set {} (or ILOM_PASSWORD) in the \
-                     environment or .env",
-                    self.password_env.as_deref().unwrap_or(&per_host)
-                )
+            .ok_or_else(|| MissingPassword {
+                name: name.to_string(),
+                variable: self.password_env.clone().unwrap_or(per_host),
             })?;
         Ok(Source::Web {
             host,
@@ -283,5 +415,133 @@ mod tests {
         assert_eq!(host.vnc_password("a", &env_of(&both)).as_deref(), Some("x"));
         assert_eq!(host.vnc_password("b", &env_of(&both)).as_deref(), Some("y"));
         assert_eq!(host.vnc_password("b", &env_of(&[])), None);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ilom-hosts-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("hosts.toml")
+    }
+
+    fn web(host: &str) -> Host {
+        Host {
+            host: Some(host.into()),
+            ..Host::default()
+        }
+    }
+
+    #[test]
+    fn save_creates_the_file_and_directory() {
+        let path = scratch("create")
+            .parent()
+            .unwrap()
+            .join("nested")
+            .join("hosts.toml");
+        let host = Host {
+            user: Some("admin".into()),
+            layout: Some("fr".into()),
+            ..web("10.0.0.5")
+        };
+        HostsFile::save_host(&path, "rack1", &host).unwrap();
+        let file = HostsFile::load(&path).unwrap();
+        assert_eq!(file.hosts["rack1"], host);
+    }
+
+    #[test]
+    fn edit_keeps_comments_and_foreign_keys() {
+        let path = scratch("edit");
+        fs::write(
+            &path,
+            "# my racks\n[hosts.rack1]\nhost = \"10.0.0.5\" # main\nlisten = \"127.0.0.1:5901\"\n\
+             media_dir = \"/srv/iso\"\nallow_writable_media = true\nuser = \"old\"\n\n\
+             [hosts.rack2]\nhost = \"10.0.0.6\"\nlisten = \"127.0.0.1:5902\"\n",
+        )
+        .unwrap();
+        let edited = Host {
+            user: None,
+            layout: Some("us".into()),
+            ..web("10.0.0.9")
+        };
+        HostsFile::save_host(&path, "rack1", &edited).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my racks"), "{text}");
+        assert!(text.contains("# main"), "{text}");
+        assert!(!text.contains("user"), "{text}");
+        let file = HostsFile::load(&path).unwrap();
+        let rack1 = &file.hosts["rack1"];
+        assert_eq!(rack1.host.as_deref(), Some("10.0.0.9"));
+        assert_eq!(rack1.layout.as_deref(), Some("us"));
+        assert_eq!(rack1.listen.as_deref(), Some("127.0.0.1:5901"));
+        assert_eq!(rack1.media_dir, Some(PathBuf::from("/srv/iso")));
+        assert_eq!(rack1.allow_writable_media, Some(true));
+        assert_eq!(file.hosts["rack2"].host.as_deref(), Some("10.0.0.6"));
+    }
+
+    #[test]
+    fn switching_between_host_and_jnlp() {
+        let path = scratch("jnlp");
+        HostsFile::save_host(&path, "a", &web("h")).unwrap();
+        let jnlp = Host {
+            jnlp: Some("/tmp/a.jnlp".into()),
+            ..Host::default()
+        };
+        HostsFile::save_host(&path, "a", &jnlp).unwrap();
+        let file = HostsFile::load(&path).unwrap();
+        assert_eq!(file.hosts["a"].host, None);
+        assert_eq!(file.hosts["a"].jnlp, Some(PathBuf::from("/tmp/a.jnlp")));
+    }
+
+    #[test]
+    fn remove_host_keeps_the_others() {
+        let path = scratch("remove");
+        HostsFile::save_host(&path, "a", &web("h")).unwrap();
+        HostsFile::save_host(&path, "b", &web("i")).unwrap();
+        assert!(HostsFile::remove_host(&path, "a").unwrap());
+        assert!(!HostsFile::remove_host(&path, "a").unwrap());
+        let file = HostsFile::load(&path).unwrap();
+        assert_eq!(file.hosts.keys().collect::<Vec<_>>(), ["b"]);
+        assert!(!HostsFile::remove_host(&scratch("missing"), "a").unwrap());
+    }
+
+    #[test]
+    fn rename_refuses_an_existing_target() {
+        let path = scratch("rename");
+        fs::write(&path, "[hosts.a]\n# about a\nhost = \"h\"\n").unwrap();
+        HostsFile::save_host(&path, "b", &web("i")).unwrap();
+        assert!(HostsFile::rename_host(&path, "a", "b").is_err());
+        assert!(HostsFile::rename_host(&path, "zz", "c").is_err());
+        assert!(HostsFile::rename_host(&path, "a", " ").is_err());
+        HostsFile::rename_host(&path, "a", "c").unwrap();
+        let file = HostsFile::load(&path).unwrap();
+        assert_eq!(file.hosts.keys().collect::<Vec<_>>(), ["b", "c"]);
+        assert_eq!(file.hosts["c"].host.as_deref(), Some("h"));
+        assert!(fs::read_to_string(&path).unwrap().contains("# about a"));
+    }
+
+    #[test]
+    fn save_validates() {
+        let path = scratch("validate");
+        assert!(HostsFile::save_host(&path, "", &web("h")).is_err());
+        assert!(HostsFile::save_host(&path, "a", &Host::default()).is_err());
+        let both = Host {
+            jnlp: Some("f".into()),
+            ..web("h")
+        };
+        assert!(HostsFile::save_host(&path, "a", &both).is_err());
+        let bad_layout = Host {
+            layout: Some("xx".into()),
+            ..web("h")
+        };
+        assert!(HostsFile::save_host(&path, "a", &bad_layout).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn missing_password_can_be_downcast() {
+        let error = web("h").source("rack-1", &env_of(&[])).unwrap_err();
+        let missing = error.downcast_ref::<MissingPassword>().unwrap();
+        assert_eq!(missing.variable, "ILOM_PASSWORD_RACK_1");
+        assert_eq!(missing.name, "rack-1");
     }
 }
