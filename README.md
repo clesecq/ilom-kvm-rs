@@ -59,7 +59,17 @@ warns after the host is saved; the list also has **Forget password**) adds, edit
 entries. Saving keeps comments and the `listen`, `media_dir` and
 `allow_writable_media` keys that the viewer does not edit. **Custom** keeps the
 manual address entry. `--name` preselects a host (and `--auto` connects to it);
-`--jnlp` and `--host` win over it. Switch hosts with Disconnect.
+`--jnlp` and `--host` win over it. Switch hosts with Disconnect, or in one step with the host combo in the
+toolbar (shown when `hosts.toml` has hosts): the old session is closed first
+(the ILOM has few session slots), then the chosen host connects with its
+environment or keyring password; with none, the login form opens on that host
+and asks for it. Hosts that use a JNLP file are listed but disabled, because
+their launch file works once. With virtual media mounted, switching asks first.
+
+The viewer remembers the last picture of the hosts it used recently (at most 8
+hosts and 32 MB), only in memory and never on disk, and shows it dimmed while
+a new session to that host starts, until the first live frame replaces it. A
+rejected login or an edit of the host in Manage hosts… forgets its picture.
 
 Click the framebuffer to capture the keyboard; the toolbar shows the capture
 state and a **Release** button. Keys are sent by physical position, so the

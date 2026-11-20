@@ -314,3 +314,27 @@ such as GNOME Keyring or KWallet) and a host in `hosts.toml` with no
 - [ ] **Advanced** is collapsed, and open for a host that has `password_env`;
       the value survives a save.
 - [ ] The dialog is centred over a darkened login form.
+
+## Host switcher and cache
+
+Needs two ILOMs in `hosts.toml` (`rack1`, `rack2`) with passwords in the
+environment or the keyring, and a third entry using `jnlp`.
+
+- [ ] While connected to `rack1`, the toolbar has a host combo naming it. The
+      JNLP host is listed greyed out with a tooltip.
+- [ ] Choosing `rack2` closes `rack1`'s session and connects in one step, with
+      no login form; the ILOM's session count does not grow after several
+      switches back and forth.
+- [ ] Switching back to `rack1` shows its last picture dimmed with the status
+      overlay, then the live frame replaces it.
+- [ ] With virtual media mounted, choosing another host asks first
+      ("Switch to rack2 while media is mounted?"); Cancel keeps the session.
+- [ ] Switching to a host with no environment or keyring password opens the
+      login form on that host with the password field focused and
+      "Password needed for <name>".
+- [ ] A rejected login on `rack2` (wrong saved password) does not delete
+      `rack1`'s keyring entry, and `rack2`'s cached picture is gone.
+- [ ] Editing or deleting a host in Manage hosts… drops its cached picture
+      (reconnecting shows no stale image).
+- [ ] Nothing is written to disk for the cache (no image files in the config
+      or temp directories).
