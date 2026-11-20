@@ -202,10 +202,20 @@ Wrong password (only with care: repeated failures may lock the account):
 ## MCP server
 
 - [ ] `claude mcp add ilom -- ilom-mcp` (with `ILOM_*` in the environment):
-      `/mcp` shows the server connected with 7 tools.
+      `/mcp` shows the server connected with 9 tools.
 - [ ] `screenshot` returns the host screen after about 10 s; stderr shows the
       session starting and stdout carries only protocol messages.
 - [ ] `screenshot` of a powered-off host answers that the screen is blank.
+- [ ] `read_screen` on a default build (no `ocr` feature) gives a tool error
+      that says to rebuild with `--features ocr`.
+- [ ] With `--features ocr` and no models: the server starts and the other
+      tools work; `read_screen` gives a tool error naming the models
+      directory, the two `.onnx` files and where to download them.
+- [ ] With the models in `ILOM_OCR_MODELS` at a BIOS or login screen,
+      `read_screen` returns the screen size and one line per text with
+      `y`, `x`, `w`, `h`; the text matches the menu. The centre of a returned
+      box passed to `mouse` `click` hits the right item. A blank host gives
+      the blank-screen answer; a picture without text says no text was found.
 - [ ] `type_text` with `a1@ê` on a French host (`--layout fr`) types the same
       characters on the host.
 - [ ] `send_keys` with `ctrl`+`alt` and `delete` reaches the host (login

@@ -255,6 +255,17 @@ control `mount_media`: `--media-dir` (`ILOM_MCP_MEDIA_DIR`) and
 `--allow-writable-media` (`ILOM_MCP_ALLOW_WRITABLE_MEDIA`). Logs go to stderr,
 because stdout carries the protocol.
 
+OCR for `read_screen` is optional and off by default, so the default build
+has no OCR dependencies. Build it with `cargo build --release -p ilom-mcp
+--features ocr` (pure Rust, [`ocrs`](https://github.com/robertknight/ocrs)).
+The models are not bundled: download `text-detection.onnx` and
+`text-recognition.onnx` from
+`https://ocrs-models.s3-accelerate.amazonaws.com/` into `ocr-models/` in the
+config directory, or into the directory given by `--ocr-models`
+(`ILOM_OCR_MODELS`). They load on the first `read_screen`; without them the
+server still starts and only that tool fails. Recognition takes a second or
+more on a release build and is much slower in debug builds.
+
 Tools:
 
 - `list_hosts`: the configured hosts and their console state, without opening
@@ -263,6 +274,12 @@ Tools:
 - `screenshot`: the host screen as a PNG, with the connection state in the
   text. A reconnecting console shows its last picture, and the text then says
   it may be old. A host that sends no video gives a text answer instead.
+- `read_screen`: the text on the host screen found by OCR, one line per text
+  with its box in pixels (`y=<row> x=<col> w=<w> h=<h>: <text>`, the same
+  coordinates as `screenshot` and `mouse`). For agents that cannot see images,
+  or to read small fonts. OCR can misread small or low-contrast text, and
+  needs the `ocr` feature (see below); without it the tool answers with an
+  error.
 - `type_text`: types text through the host layout.
 - `send_keys`: key presses with modifiers, for example `ctrl`+`alt`+`delete`.
 - `mouse`: `move`, `click` or `double` at pixel coordinates of the latest
@@ -280,8 +297,9 @@ Limits: the first call takes about 10 s (it opens the console session). The
 session closes after `--idle-timeout` seconds without calls, except while
 media is mounted. Input tools run one at a time. A `type_text` that times out
 is cancelled, but keys already queued cannot be recalled. The mouse wheel is not supported (the SP's reports have
-none), nor is relative mouse mode. There is no power control and no text
-recognition: the agent reads the screenshots itself.
+none), nor is relative mouse mode. There is no power control. Text recognition
+is only available through `read_screen` in an `ocr` build; otherwise the agent
+reads the screenshots itself.
 
 Security: the server runs with your ILOM credentials and gives the agent full
 control of the host console, including login prompts. `mount_media` lets the
