@@ -16,18 +16,27 @@ use serde::Deserialize;
 use crate::{
     console::{Button, Console, Pointer, state_label},
     keys,
+    ocr::{Ocr, format_lines},
     registry::Registry,
 };
 
 const INSTRUCTIONS: &str = "Drives the host console of an Oracle ILOM server: \
-screenshots, keyboard, mouse and virtual media. The first call opens the console \
-session and takes about 10 seconds. Mouse coordinates are pixels of the latest \
-screenshot. Several ILOM hosts may be configured: pass `host` (see list_hosts) \
+screenshots, screen text (read_screen), keyboard, mouse and virtual media. The \
+first call opens the console session and takes about 10 seconds. Mouse \
+coordinates are pixels of the latest screenshot or read_screen result. \
+Several ILOM hosts may be configured: pass `host` (see list_hosts) \
 to pick one; it can be omitted only when there is a single host.";
+
+const BLANK_SCREEN: &str = "The screen is blank: the host is powered off or sends no video \
+signal (no picture was received).";
+
+const STALE_WARNING: &str = "WARNING: the console is not connected, this picture may be old; \
+call status or retry shortly";
 
 #[derive(Clone)]
 pub struct IlomServer {
     registry: Arc<Registry>,
+    ocr: Arc<Ocr>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -156,9 +165,10 @@ pub struct UnmountParams {
 }
 
 impl IlomServer {
-    pub fn new(registry: Registry) -> Self {
+    pub fn new(registry: Registry, ocr: Ocr) -> Self {
         Self {
             registry: Arc::new(registry),
+            ocr: Arc::new(ocr),
             tool_router: Self::tool_router(),
         }
     }
@@ -222,21 +232,49 @@ impl IlomServer {
                         shot.message
                     );
                     if shot.stale() {
-                        note.push_str(
-                            ". WARNING: the console is not connected, this picture may be old; \
-                             call status or retry shortly",
-                        );
+                        note.push_str(&format!(". {STALE_WARNING}"));
                     }
                     vec![
                         ContentBlock::image(STANDARD.encode(&shot.png), "image/png"),
                         ContentBlock::text(note),
                     ]
                 }
-                None => vec![ContentBlock::text(
-                    "The screen is blank: the host is powered off or sends no video signal \
-                     (no picture was received).",
-                )],
+                None => vec![ContentBlock::text(BLANK_SCREEN)],
             })
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read the text on the host console with OCR. Returns each text line with its pixel position (same coordinate space as screenshot and mouse). Prefer screenshot for graphics; OCR can misread small or low-contrast text."
+    )]
+    async fn read_screen(
+        &self,
+        Parameters(params): Parameters<HostParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ocr = self.ocr.clone();
+        self.run(params.host, move |console| {
+            let Some(capture) = console.capture()? else {
+                return Ok(vec![ContentBlock::text(BLANK_SCREEN)]);
+            };
+            let lines = ocr.read(&capture.frame)?;
+            let mut text = if lines.is_empty() {
+                format!(
+                    "{}x{} pixels; no text found. Try screenshot to look at the picture.",
+                    capture.frame.width, capture.frame.height
+                )
+            } else {
+                format_lines(&lines, capture.frame.width, capture.frame.height)
+            };
+            text.push_str(&format!(
+                "\nconnection {} ({})",
+                state_label(capture.state),
+                capture.message
+            ));
+            if capture.stale() {
+                text.push_str(&format!(". {STALE_WARNING}"));
+            }
+            Ok(vec![ContentBlock::text(text)])
         })
         .await
     }
@@ -432,7 +470,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lists_the_eight_tools() {
+    fn lists_the_nine_tools() {
         let mut names: Vec<_> = IlomServer::tool_router()
             .list_all()
             .into_iter()
@@ -445,6 +483,7 @@ mod tests {
                 "list_hosts",
                 "mount_media",
                 "mouse",
+                "read_screen",
                 "screenshot",
                 "send_keys",
                 "status",

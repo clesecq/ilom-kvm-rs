@@ -18,7 +18,9 @@ dirs = "6"
 dotenvy = "0.15.7"
 hex = "0.4.3"
 keyring = "4.2.0"
+ocrs = { version = "0.14", default-features = false, features = ["onnx"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+rten = "0.28"
 rmcp = { version = "3.11.0", features = ["server", "macros", "schemars", "transport-io"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

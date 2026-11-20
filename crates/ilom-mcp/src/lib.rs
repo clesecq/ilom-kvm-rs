@@ -3,5 +3,6 @@
 
 pub mod console;
 pub mod keys;
+pub mod ocr;
 pub mod registry;
 pub mod tools;

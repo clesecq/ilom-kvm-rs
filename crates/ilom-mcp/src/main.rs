@@ -3,12 +3,14 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use ilom_kvm_core::{
+    config,
     hosts::{DEFAULT_NAME, Host, HostsFile, parse_layout},
     keymap::Layout,
     keyring::OsKeyring,
 };
 use ilom_mcp::{
     console::{Console, MediaPolicy},
+    ocr::Ocr,
     registry::Registry,
     tools::IlomServer,
 };
@@ -54,6 +56,11 @@ struct Cli {
     /// [default: from the locale].
     #[arg(long, env = "ILOM_LAYOUT", value_parser = parse_layout)]
     layout: Option<Layout>,
+    /// Directory with the OCR models `text-detection.onnx` and
+    /// `text-recognition.onnx`, used by `read_screen` (needs a build with
+    /// `--features ocr`) [default: ocr-models in the config directory].
+    #[arg(long, env = "ILOM_OCR_MODELS")]
+    ocr_models: Option<PathBuf>,
     /// Seconds to keep the ILOM session after the last tool call. Mounted
     /// media keeps it open regardless.
     #[arg(long, default_value_t = 60)]
@@ -114,7 +121,10 @@ async fn main() -> Result<()> {
     }
     info!(hosts = %hosts.keys().cloned().collect::<Vec<_>>().join(", "), "configured");
     info!("MCP server ready on stdio");
-    let service = IlomServer::new(Registry::new(consoles))
+    let ocr_dir = cli
+        .ocr_models
+        .unwrap_or_else(|| config::dir().unwrap_or_default().join("ocr-models"));
+    let service = IlomServer::new(Registry::new(consoles), Ocr::new(ocr_dir))
         .serve(stdio())
         .await
         .context("start the MCP server")?;

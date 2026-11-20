@@ -69,6 +69,20 @@ impl Screenshot {
     }
 }
 
+/// The latest frame and the connection state it was seen in.
+pub struct Capture {
+    pub frame: Arc<DecodedFrame>,
+    pub state: ConnectionState,
+    pub message: String,
+}
+
+impl Capture {
+    /// The picture may be old: the session is not connected right now.
+    pub fn stale(&self) -> bool {
+        self.state != ConnectionState::Connected
+    }
+}
+
 /// Where `mount_media` may read from, and whether images may be written.
 #[derive(Debug, Clone, Default)]
 pub struct MediaPolicy {
@@ -188,19 +202,30 @@ impl Console {
         drop(old);
     }
 
-    pub fn screenshot(&self) -> Result<Option<Screenshot>, String> {
+    /// The latest frame, or `None` while the host sends no picture.
+    pub fn capture(&self) -> Result<Option<Capture>, String> {
         let attachment = self.attach()?;
         let Some(frame) = latest_frame(&attachment) else {
             return Ok(None);
         };
-        let png = encode_png(&frame)?;
         let status = status(&attachment);
-        Ok(Some(Screenshot {
-            png,
-            width: frame.width,
-            height: frame.height,
+        Ok(Some(Capture {
+            frame,
             state: status.state,
             message: status.message,
+        }))
+    }
+
+    pub fn screenshot(&self) -> Result<Option<Screenshot>, String> {
+        let Some(capture) = self.capture()? else {
+            return Ok(None);
+        };
+        Ok(Some(Screenshot {
+            png: encode_png(&capture.frame)?,
+            width: capture.frame.width,
+            height: capture.frame.height,
+            state: capture.state,
+            message: capture.message,
         }))
     }
 
@@ -450,15 +475,20 @@ fn wait_counter(counter: &AtomicU64, target: u64, timeout: Duration) -> Result<(
     .ok_or(())
 }
 
-/// Encodes a frame as an opaque RGB PNG.
-pub fn encode_png(frame: &DecodedFrame) -> Result<Vec<u8>, String> {
-    let rgb: Vec<u8> = frame
+/// The frame's pixels as packed RGB, without the alpha channel.
+pub fn rgb_bytes(frame: &DecodedFrame) -> Vec<u8> {
+    frame
         .rgba
         .as_chunks::<4>()
         .0
         .iter()
         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
-        .collect();
+        .collect()
+}
+
+/// Encodes a frame as an opaque RGB PNG.
+pub fn encode_png(frame: &DecodedFrame) -> Result<Vec<u8>, String> {
+    let rgb = rgb_bytes(frame);
     let mut png = Cursor::new(Vec::new());
     PngEncoder::new(&mut png)
         .write_image(&rgb, frame.width, frame.height, ExtendedColorType::Rgb8)
