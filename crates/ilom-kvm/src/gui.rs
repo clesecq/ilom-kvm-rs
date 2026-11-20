@@ -180,6 +180,8 @@ impl IlomApp {
                                     self.host = fill.address;
                                     self.username = fill.username;
                                 }
+                                // A password typed for another host is not this one's.
+                                self.password.clear();
                                 self.form_error = None;
                             }
                             let named = self
@@ -381,6 +383,9 @@ impl eframe::App for IlomApp {
                     }
                     self.form_error = Some(if credentials {
                         self.password.clear();
+                        // Back to manual entry: a rejected environment password
+                        // could otherwise never be replaced by a typed one.
+                        self.hosts.selected = None;
                         format!("Login rejected; check the username and password ({message})")
                     } else {
                         message
