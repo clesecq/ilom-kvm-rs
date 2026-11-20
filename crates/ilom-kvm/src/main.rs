@@ -235,6 +235,7 @@ fn viewer(args: ViewerArgs) -> Result<()> {
         store.clone(),
     );
     let mut session_origin = None;
+    let mut current_host = None;
     let mut layout_override = None;
     let initial = match (&args.jnlp, named.as_deref(), args.auto) {
         (Some(path), _, _) => Some(Source::Jnlp(path.clone())),
@@ -246,6 +247,7 @@ fn viewer(args: ViewerArgs) -> Result<()> {
                 .with_context(|| format!("no host named {name:?} in the hosts file"))?;
             layout_override = host.layout();
             if auto {
+                current_host = Some(name.to_owned());
                 let env = |key: &str| std::env::var(key).ok();
                 match hosts_ui::resolve(name, host, "", &env, store.as_ref()) {
                     hosts_ui::Resolved::Ready(source) => {
@@ -288,6 +290,7 @@ fn viewer(args: ViewerArgs) -> Result<()> {
         hosts,
         layout_override,
         session_origin,
+        current_host,
     };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

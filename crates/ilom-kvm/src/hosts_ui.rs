@@ -2,7 +2,7 @@
 //! remove entries of `hosts.toml`. The state and the decisions are plain
 //! functions (tested below); only `HostsUi::show_*` draws.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use eframe::egui::{self, Color32};
 use ilom_kvm_core::{
@@ -11,6 +11,8 @@ use ilom_kvm_core::{
     keyring::{SecretStore, move_entry},
     session::Source,
 };
+
+use crate::host_cache::HostCache;
 
 /// What a host entry connects to.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -233,6 +235,91 @@ pub fn lookup(name: &str, host: &Host, env: Env, store: &dyn SecretStore) -> Pas
     }
 }
 
+/// What a switch request does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchPlan {
+    /// Already on that host.
+    Noop,
+    Go,
+    /// Mounted images would be lost: ask first.
+    Confirm,
+}
+
+pub fn plan_switch(current: Option<&str>, target: &str, mounted: bool) -> SwitchPlan {
+    if current == Some(target) {
+        SwitchPlan::Noop
+    } else if mounted {
+        SwitchPlan::Confirm
+    } else {
+        SwitchPlan::Go
+    }
+}
+
+/// Resolves a switch to `name` without a typed password. Unknown and
+/// JNLP-file hosts cannot be switched to (the file's secret works once).
+pub fn switch_resolution(
+    file: &HostsFile,
+    name: &str,
+    env: Env,
+    store: &dyn SecretStore,
+) -> Result<(Host, Resolved), String> {
+    let host = file
+        .hosts
+        .get(name)
+        .ok_or_else(|| format!("No host called {name:?}"))?;
+    if host.jnlp.is_some() {
+        return Err(format!(
+            "{name} uses a JNLP file, which works once: connect from the login form"
+        ));
+    }
+    Ok((host.clone(), resolve(name, host, "", env, store)))
+}
+
+/// One host in the toolbar switcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitcherItem {
+    pub name: String,
+    /// False for JNLP-file hosts.
+    pub switchable: bool,
+    pub tooltip: String,
+}
+
+/// The toolbar's host combo; returns the host picked, if it is another one.
+pub fn show_switcher(
+    ui: &mut egui::Ui,
+    items: &[SwitcherItem],
+    current: Option<&str>,
+) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut picked = None;
+    egui::ComboBox::from_id_salt("toolbar-host-switcher")
+        .selected_text(current.unwrap_or("Switch host"))
+        .width(120.0)
+        .show_ui(ui, |ui| {
+            for item in items {
+                let response = ui.add_enabled(
+                    item.switchable,
+                    egui::Button::selectable(current == Some(item.name.as_str()), &item.name),
+                );
+                let response = if item.tooltip.is_empty() {
+                    response
+                } else {
+                    response
+                        .on_disabled_hover_text(&item.tooltip)
+                        .on_hover_text(&item.tooltip)
+                };
+                if response.clicked() {
+                    picked = Some(item.name.clone());
+                }
+            }
+        })
+        .response
+        .on_hover_text("Switch to another host");
+    picked.filter(|name| current != Some(name.as_str()))
+}
+
 #[derive(Default)]
 struct Manage {
     editing: Option<HostForm>,
@@ -254,9 +341,12 @@ pub struct HostsUi {
     pub selected: Option<String>,
     manage: Option<Manage>,
     store: Arc<dyn SecretStore>,
-    /// The keyring is slow to ask, so the form's answer is kept per host
-    /// until something may have changed it.
-    cache: Option<(String, PasswordLookup)>,
+    /// The keyring is slow to ask, so each host's answer is kept until
+    /// something may have changed it.
+    lookups: HashMap<String, PasswordLookup>,
+    /// Hosts edited, renamed or removed in the dialog since the last
+    /// [`HostsUi::take_changed`], whose cached frames are stale.
+    changed: Vec<String>,
 }
 
 const ERROR_COLOR: Color32 = Color32::from_rgb(235, 90, 90);
@@ -275,7 +365,8 @@ impl HostsUi {
             selected,
             manage: None,
             store,
-            cache: None,
+            lookups: HashMap::new(),
+            changed: Vec::new(),
         };
         ui.reload();
         ui
@@ -283,7 +374,7 @@ impl HostsUi {
 
     /// Rereads the file; a broken file shows its error and no hosts.
     pub fn reload(&mut self) {
-        self.cache = None;
+        self.lookups.clear();
         self.load_error = None;
         self.file = match &self.path {
             Some(path) => HostsFile::load(path).unwrap_or_else(|error| {
@@ -319,23 +410,73 @@ impl HostsUi {
 
     /// Forgets the cached password lookup: the keyring may have changed.
     pub fn invalidate(&mut self) {
-        self.cache = None;
+        self.lookups.clear();
+    }
+
+    /// Names changed in the dialog since the last call.
+    pub fn take_changed(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.changed)
     }
 
     /// Where the picked host's password comes from, asking the keyring once
     /// per host.
     pub fn password_lookup(&mut self, env: Env) -> Option<PasswordLookup> {
-        let (name, host) = self
-            .selected_host()
-            .map(|(name, host)| (name.to_owned(), host.clone()))?;
-        if let Some((cached, found)) = &self.cache
-            && *cached == name
-        {
+        let name = self.selected.clone()?;
+        self.password_lookup_for(&name, env)
+    }
+
+    /// Like [`HostsUi::password_lookup`] for any host of the file.
+    pub fn password_lookup_for(&mut self, name: &str, env: Env) -> Option<PasswordLookup> {
+        if let Some(found) = self.lookups.get(name) {
             return Some(found.clone());
         }
-        let found = lookup(&name, &host, env, self.store.as_ref());
-        self.cache = Some((name, found.clone()));
+        let host = self.file.hosts.get(name)?;
+        let found = lookup(name, host, env, self.store.as_ref());
+        self.lookups.insert(name.to_owned(), found.clone());
         Some(found)
+    }
+
+    /// The hosts the toolbar switcher offers. Uses only what is already
+    /// cached, so it is safe to call every frame.
+    pub fn switcher_items(&self, cache: &HostCache) -> Vec<SwitcherItem> {
+        self.file
+            .hosts
+            .iter()
+            .map(|(name, host)| {
+                let switchable = host.jnlp.is_none();
+                let mut tooltip = if switchable {
+                    String::new()
+                } else {
+                    "A JNLP file works once: connect from the login form".to_owned()
+                };
+                if switchable {
+                    if let Some(((width, height), age)) = cache.describe(name) {
+                        tooltip = format!("Last seen {width}×{height}, {} s ago", age.as_secs());
+                    }
+                    let password = match self.lookups.get(name) {
+                        Some(PasswordLookup::Found(PasswordOrigin::Env)) => {
+                            Some("password from the environment")
+                        }
+                        Some(PasswordLookup::Found(PasswordOrigin::Keyring)) => {
+                            Some("password from the keyring")
+                        }
+                        Some(PasswordLookup::Prompt(_)) => Some("asks for a password"),
+                        _ => None,
+                    };
+                    if let Some(password) = password {
+                        if !tooltip.is_empty() {
+                            tooltip.push_str("; ");
+                        }
+                        tooltip.push_str(password);
+                    }
+                }
+                SwitcherItem {
+                    name: name.clone(),
+                    switchable,
+                    tooltip,
+                }
+            })
+            .collect()
     }
 
     pub fn open_manage(&mut self) {
@@ -358,11 +499,7 @@ impl HostsUi {
                     ui.selectable_value(&mut self.selected, Some(name.clone()), name);
                 }
             });
-        if self.selected != before {
-            self.cache = None;
-            return true;
-        }
-        false
+        self.selected != before
     }
 
     /// The add/edit/remove dialog, while open.
@@ -418,6 +555,7 @@ impl HostsUi {
                 manage.notice = None;
                 match self.store.delete(&name) {
                     Ok(()) => {
+                        self.lookups.remove(&name);
                         manage.notice = Some(format!("Saved password of {name} forgotten"));
                         if manage
                             .editing
@@ -432,12 +570,12 @@ impl HostsUi {
                         manage.error = Some(format!("Could not forget the password: {error:#}"));
                     }
                 }
-                self.cache = None;
             }
             Some(Action::CancelDelete) => manage.confirm_delete = None,
             Some(Action::ConfirmDelete(name)) => {
                 manage.confirm_delete = None;
                 manage.notice = None;
+                self.changed.push(name.clone());
                 manage.error = HostsFile::remove_host(&path, &name)
                     .err()
                     .map(|error| format!("{error:#}"));
@@ -459,6 +597,8 @@ impl HostsUi {
                 if let Some(form) = manage.editing.clone() {
                     match apply_save(&path, &self.file, &form, self.store.as_ref()) {
                         Ok(saved) => {
+                            self.changed.extend(form.original.clone());
+                            self.changed.push(saved.name.clone());
                             manage.editing = None;
                             manage.error = None;
                             manage.notice = saved.warning;
@@ -1031,5 +1171,134 @@ mod tests {
         apply_save(&path, &file, &form, &MemoryStore::new()).unwrap();
         let saved = HostsFile::load(&path).unwrap();
         assert_eq!(saved.hosts["a"].password_env.as_deref(), Some("MY_PW"));
+    }
+
+    #[test]
+    fn plan_switch_cases() {
+        assert_eq!(plan_switch(Some("a"), "a", false), SwitchPlan::Noop);
+        assert_eq!(plan_switch(Some("a"), "a", true), SwitchPlan::Noop);
+        assert_eq!(plan_switch(Some("a"), "b", false), SwitchPlan::Go);
+        assert_eq!(plan_switch(Some("a"), "b", true), SwitchPlan::Confirm);
+        // A custom (unnamed) session can switch to any host.
+        assert_eq!(plan_switch(None, "b", false), SwitchPlan::Go);
+        assert_eq!(plan_switch(None, "b", true), SwitchPlan::Confirm);
+    }
+
+    fn two_hosts_and_a_jnlp(name: &str) -> (PathBuf, Arc<MemoryStore>, HostsUi) {
+        let path = scratch(name);
+        fs::write(
+            &path,
+            "[hosts.a]\nhost = \"10.0.0.1\"\n[hosts.b]\nhost = \"10.0.0.2\"\n\
+             [hosts.j]\njnlp = \"/tmp/j.jnlp\"\n",
+        )
+        .unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let ui = HostsUi::load(Some(path.clone()), None, store.clone());
+        (path, store, ui)
+    }
+
+    #[test]
+    fn lookups_are_cached_per_host() {
+        let (_, store, mut ui) = two_hosts_and_a_jnlp("multi");
+        let none = env_of(&[]);
+        assert_eq!(
+            ui.password_lookup_for("a", &none),
+            Some(PasswordLookup::Prompt("ILOM_PASSWORD_A".into()))
+        );
+        assert_eq!(
+            ui.password_lookup_for("b", &none),
+            Some(PasswordLookup::Prompt("ILOM_PASSWORD_B".into()))
+        );
+        assert_eq!(ui.password_lookup_for("zz", &none), None);
+        store.set("a", "pw").unwrap();
+        store.set("b", "pw").unwrap();
+        // Both still cached: the keyring is not asked again.
+        assert!(matches!(
+            ui.password_lookup_for("a", &none),
+            Some(PasswordLookup::Prompt(_))
+        ));
+        assert!(matches!(
+            ui.password_lookup_for("b", &none),
+            Some(PasswordLookup::Prompt(_))
+        ));
+        ui.invalidate();
+        assert_eq!(
+            ui.password_lookup_for("a", &none),
+            Some(PasswordLookup::Found(PasswordOrigin::Keyring))
+        );
+        // Selecting a host reuses the per-host entry, cached once asked.
+        ui.selected = Some("b".into());
+        let found = Some(PasswordLookup::Found(PasswordOrigin::Keyring));
+        assert_eq!(ui.password_lookup(&none), found);
+        store.delete("b").unwrap();
+        assert_eq!(ui.password_lookup(&none), found);
+    }
+
+    #[test]
+    fn switch_resolution_env_keyring_none() {
+        let (_, _, ui) = two_hosts_and_a_jnlp("switch");
+        let file = ui.file();
+        let none = env_of(&[]);
+        let with_env = env_of(&[("ILOM_PASSWORD_A", "envpw")]);
+        let store = MemoryStore::with(&[("b", "kpw")]);
+
+        let (_, resolved) = switch_resolution(file, "a", &with_env, &store).unwrap();
+        assert!(matches!(
+            resolved,
+            Resolved::Ready(Source::Web { ref password, .. }) if password == "envpw"
+        ));
+        let (_, resolved) = switch_resolution(file, "b", &none, &store).unwrap();
+        assert!(matches!(
+            resolved,
+            Resolved::Ready(Source::Web { ref password, .. }) if password == "kpw"
+        ));
+        let (_, resolved) = switch_resolution(file, "a", &none, &store).unwrap();
+        assert_eq!(resolved, Resolved::NeedPassword("ILOM_PASSWORD_A".into()));
+        // A broken keyring means a prompt, not a failure.
+        let (_, resolved) = switch_resolution(file, "b", &none, &MemoryStore::failing()).unwrap();
+        assert_eq!(resolved, Resolved::NeedPassword("ILOM_PASSWORD_B".into()));
+    }
+
+    #[test]
+    fn jnlp_and_unknown_hosts_cannot_be_switched_to() {
+        let (_, _, ui) = two_hosts_and_a_jnlp("jnlp-switch");
+        let store = MemoryStore::new();
+        let none = env_of(&[]);
+        let error = switch_resolution(ui.file(), "j", &none, &store).unwrap_err();
+        assert!(error.contains("JNLP"), "{error}");
+        assert!(switch_resolution(ui.file(), "nope", &none, &store).is_err());
+    }
+
+    #[test]
+    fn switcher_lists_every_host_and_disables_jnlp() {
+        let (_, _, ui) = two_hosts_and_a_jnlp("items");
+        let mut cache = HostCache::default();
+        cache.insert(
+            "a",
+            Arc::new(ilom_kvm_core::session::DecodedFrame {
+                width: 4,
+                height: 3,
+                sequence: 1,
+                rgba: vec![0; 48],
+            }),
+        );
+        let items = ui.switcher_items(&cache);
+        let names: Vec<_> = items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "j"]);
+        assert!(items[0].switchable && items[1].switchable && !items[2].switchable);
+        assert!(items[0].tooltip.contains("4×3"), "{}", items[0].tooltip);
+        assert_eq!(items[1].tooltip, "");
+        assert!(items[2].tooltip.contains("JNLP"));
+    }
+
+    #[test]
+    fn dialog_changes_are_reported_once() {
+        let (path, _, mut ui) = two_hosts_and_a_jnlp("changed");
+        assert!(ui.take_changed().is_empty());
+        // Simulate what the dialog records on save and delete.
+        ui.changed.push("a".into());
+        assert_eq!(ui.take_changed(), ["a"]);
+        assert!(ui.take_changed().is_empty());
+        let _ = path;
     }
 }

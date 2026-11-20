@@ -12,7 +12,7 @@ use eframe::egui::{
 
 use ilom_kvm_core::{
     hid,
-    hosts::PasswordOrigin,
+    hosts::{Host, PasswordOrigin},
     keymap::{self, Layout},
     scsi::MediaKind,
     session::{
@@ -23,7 +23,8 @@ use ilom_kvm_core::{
 
 use crate::{
     clipboard::Clipboard,
-    hosts_ui::{self, HostsUi, PasswordLookup},
+    host_cache::HostCache,
+    hosts_ui::{self, HostsUi, PasswordLookup, SwitchPlan, SwitcherItem, plan_switch},
     settings::Settings,
 };
 
@@ -84,6 +85,12 @@ pub struct IlomApp {
     /// Host and source of the password of the running session, so a
     /// rejected keyring password can be dropped.
     session_origin: Option<(String, PasswordOrigin)>,
+    /// Last frames of recently used hosts, in memory only.
+    cache: HostCache,
+    /// Configured host of the running session, if it was started from one.
+    current_host: Option<String>,
+    /// Put the cursor in the password field on the next login form.
+    focus_password: bool,
 }
 
 /// Viewer choices the user can change in the menus.
@@ -111,6 +118,8 @@ pub struct Startup {
     pub layout_override: Option<Layout>,
     /// Host and origin of the password of the session started at launch.
     pub session_origin: Option<(String, PasswordOrigin)>,
+    /// Configured host of the session started at launch.
+    pub current_host: Option<String>,
 }
 
 impl IlomApp {
@@ -119,8 +128,12 @@ impl IlomApp {
             layout: startup.layout_override.unwrap_or(startup.prefs.layout),
             ..startup.prefs
         };
-        let viewer = initial
-            .map(|source| ViewerApp::new(context, source, startup.capture_dir.clone(), prefs));
+        let viewer = initial.map(|source| {
+            let mut viewer =
+                ViewerApp::new(context, source, startup.capture_dir.clone(), prefs, None);
+            viewer.current_host = startup.current_host.clone();
+            viewer
+        });
         Self {
             viewer,
             host: startup.host.unwrap_or_default(),
@@ -136,6 +149,9 @@ impl IlomApp {
             save_to_keyring: false,
             pending_save: None,
             session_origin: startup.session_origin,
+            cache: HostCache::default(),
+            current_host: startup.current_host,
+            focus_password: false,
         }
     }
 
@@ -247,13 +263,16 @@ impl IlomApp {
                                     }
                                     None => ui.label("Password"),
                                 };
-                                responses.push(
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.password)
-                                            .password(true)
-                                            .desired_width(f32::INFINITY),
-                                    ),
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut self.password)
+                                        .password(true)
+                                        .desired_width(f32::INFINITY),
                                 );
+                                if self.focus_password {
+                                    response.request_focus();
+                                    self.focus_password = false;
+                                }
+                                responses.push(response);
                                 if named.is_some() && !self.password.is_empty() {
                                     ui.checkbox(
                                         &mut self.save_to_keyring,
@@ -310,7 +329,11 @@ impl IlomApp {
             self.hosts.open_manage();
         }
         self.hosts.show_manage(ui.ctx());
+        for name in self.hosts.take_changed() {
+            self.cache.clear_host(&name);
+        }
         if open_jnlp {
+            self.current_host = None;
             self.session_origin = None;
             self.pending_save = None;
             self.layout_override = None;
@@ -330,23 +353,10 @@ impl IlomApp {
         {
             let lookup = self.hosts.password_lookup(&env);
             let store = self.hosts.store().clone();
-            return match hosts_ui::resolve(&name, &host, &self.password, &env, store.as_ref()) {
+            let typed = self.password.clone();
+            return match hosts_ui::resolve(&name, &host, &typed, &env, store.as_ref()) {
                 hosts_ui::Resolved::Ready(source) => {
-                    self.form_error = None;
-                    self.session_origin = match lookup {
-                        Some(PasswordLookup::Found(origin)) => Some((name.clone(), origin)),
-                        _ => None,
-                    };
-                    // A typed password is kept only once the login worked.
-                    self.pending_save = (self.session_origin.is_none()
-                        && self.save_to_keyring
-                        && host.jnlp.is_none()
-                        && !self.password.is_empty())
-                    .then(|| (name.clone(), self.password.clone()));
-                    self.layout_override = host.layout();
-                    self.settings.last_host_name = Some(name);
-                    self.save_settings();
-                    Some(source)
+                    Some(self.ready_named(&name, &host, &typed, source, lookup))
                 }
                 hosts_ui::Resolved::NeedPassword(_) => {
                     self.form_error = Some("Enter a password".into());
@@ -361,6 +371,7 @@ impl IlomApp {
         match self.web_source() {
             Ok(source) => {
                 self.form_error = None;
+                self.current_host = None;
                 self.session_origin = None;
                 self.pending_save = None;
                 self.layout_override = None;
@@ -375,6 +386,105 @@ impl IlomApp {
             Err(error) => {
                 self.form_error = Some(error);
                 None
+            }
+        }
+    }
+
+    /// Bookkeeping for a session on a configured host; returns its source.
+    fn ready_named(
+        &mut self,
+        name: &str,
+        host: &Host,
+        typed: &str,
+        source: Source,
+        lookup: Option<PasswordLookup>,
+    ) -> Source {
+        self.form_error = None;
+        self.session_origin = match lookup {
+            Some(PasswordLookup::Found(origin)) => Some((name.to_owned(), origin)),
+            _ => None,
+        };
+        // A typed password is kept only once the login worked.
+        self.pending_save = (self.session_origin.is_none()
+            && self.save_to_keyring
+            && host.jnlp.is_none()
+            && !typed.is_empty())
+        .then(|| (name.to_owned(), typed.to_owned()));
+        self.layout_override = host.layout();
+        self.current_host = Some(name.to_owned());
+        self.settings.last_host_name = Some(name.to_owned());
+        self.save_settings();
+        source
+    }
+
+    /// Starts a session, showing the host's cached frame until live video
+    /// arrives.
+    fn start_viewer(&mut self, ctx: &egui::Context, source: Source) {
+        let cached = self
+            .current_host
+            .clone()
+            .and_then(|name| self.cache.frame(&name));
+        let mut viewer = ViewerApp::new(
+            ctx,
+            source,
+            self.capture_dir.clone(),
+            self.session_prefs(),
+            cached,
+        );
+        viewer.current_host = self.current_host.clone();
+        self.viewer = Some(viewer);
+    }
+
+    /// Remembers the running session's last picture for its host.
+    fn snapshot_frame(&mut self) {
+        if let (Some(viewer), Some(name)) = (&self.viewer, &self.current_host)
+            && let Some(frame) = &viewer.displayed_frame
+        {
+            self.cache.insert(name, frame.clone());
+        }
+    }
+
+    /// Back to the login form's window state.
+    fn reset_window(ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(APP_TITLE.into()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+            egui::viewport::CursorGrab::None,
+        ));
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+    }
+
+    /// Leaves the running session for another configured host in one step.
+    /// The old session is dropped first: the ILOM has few session slots. With
+    /// no password available the login form opens on that host instead.
+    fn switch_host(&mut self, ctx: &egui::Context, name: String) {
+        self.snapshot_frame();
+        let env = |key: &str| std::env::var(key).ok();
+        let store = self.hosts.store().clone();
+        let resolution =
+            hosts_ui::switch_resolution(self.hosts.file(), &name, &env, store.as_ref());
+        // Dropping the viewer stops its session and waits for it.
+        self.viewer = None;
+        self.session_origin = None;
+        self.pending_save = None;
+        self.save_to_keyring = false;
+        self.layout_override = None;
+        self.current_host = None;
+        match resolution {
+            Ok((host, hosts_ui::Resolved::Ready(source))) => {
+                let lookup = self.hosts.password_lookup_for(&name, &env);
+                let source = self.ready_named(&name, &host, "", source, lookup);
+                self.start_viewer(ctx, source);
+            }
+            Ok((_, hosts_ui::Resolved::NeedPassword(_))) => {
+                Self::reset_window(ctx);
+                self.hosts.selected = Some(name.clone());
+                self.password.clear();
+                self.form_error = Some(format!("Password needed for {name}"));
+                self.focus_password = true;
+            }
+            Ok((_, hosts_ui::Resolved::Invalid(message))) | Err(message) => {
+                Self::reset_window(ctx);
+                self.form_error = Some(message);
             }
         }
     }
@@ -405,7 +515,9 @@ impl IlomApp {
 impl eframe::App for IlomApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if let Some(viewer) = self.viewer.as_mut() {
+            viewer.switcher = self.hosts.switcher_items(&self.cache);
             eframe::App::ui(viewer, ui, frame);
+            let switch = viewer.switch_to.take();
             let prefs = viewer.prefs;
             let rejected = viewer.rejection();
             let login = viewer.login.clone();
@@ -423,7 +535,19 @@ impl eframe::App for IlomApp {
                 }
                 self.hosts.invalidate();
             }
+            if let Some(target) = switch {
+                let ctx = ui.ctx().clone();
+                self.switch_host(&ctx, target);
+                return;
+            }
             if leaving {
+                // Keep the last picture for a quick return, unless the login
+                // was refused: that host's cached data is stale.
+                match (&rejected, &self.current_host) {
+                    (Some((true, _)), Some(name)) => self.cache.clear_host(name),
+                    _ => self.snapshot_frame(),
+                }
+                self.current_host = None;
                 self.layout_override = None;
                 self.pending_save = None;
                 self.save_to_keyring = false;
@@ -459,22 +583,13 @@ impl eframe::App for IlomApp {
                     });
                 }
                 self.viewer = None;
-                let ctx = ui.ctx();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(APP_TITLE.into()));
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(
-                    egui::viewport::CursorGrab::None,
-                ));
-                ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+                Self::reset_window(ui.ctx());
             }
             return;
         }
         if let Some(source) = self.show_login(ui) {
-            self.viewer = Some(ViewerApp::new(
-                ui.ctx(),
-                source,
-                self.capture_dir.clone(),
-                self.session_prefs(),
-            ));
+            let ctx = ui.ctx().clone();
+            self.start_viewer(&ctx, source);
         }
     }
 }
@@ -569,10 +684,12 @@ impl HostAction {
 }
 
 /// How the user asked to leave the console.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Exit {
     Disconnect,
     Quit,
+    /// Leave for another configured host.
+    Switch(String),
 }
 
 pub struct ViewerApp {
@@ -600,6 +717,12 @@ pub struct ViewerApp {
     /// Opened on the first frame, which gives the window's display handle.
     clipboard: Option<Clipboard>,
     disconnect_requested: bool,
+    /// Hosts offered by the toolbar switcher, refreshed every frame.
+    switcher: Vec<SwitcherItem>,
+    /// Name of the configured host this session belongs to.
+    current_host: Option<String>,
+    /// Host the user asked to switch to, taken by the app.
+    switch_to: Option<String>,
     /// Exit waiting for confirmation because images are still mounted.
     pending_exit: Option<Exit>,
     quit_confirmed: bool,
@@ -617,6 +740,7 @@ impl ViewerApp {
         source: Source,
         capture_dir: PathBuf,
         prefs: ViewerPrefs,
+        cached: Option<Arc<DecodedFrame>>,
     ) -> Self {
         context.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "{} — {APP_TITLE}",
@@ -627,8 +751,9 @@ impl ViewerApp {
             Source::Jnlp(_) => None,
         };
         let context = context.clone();
+        let seed_context = context.clone();
         let handle = spawn_viewer(source, move || context.request_repaint());
-        Self {
+        let mut viewer = Self {
             handle,
             login,
             prefs,
@@ -646,12 +771,22 @@ impl ViewerApp {
             capture_dir,
             clipboard: None,
             disconnect_requested: false,
+            switcher: Vec::new(),
+            current_host: None,
+            switch_to: None,
             pending_exit: None,
             quit_confirmed: false,
             captured_by: None,
             host_key: None,
             floppy_writable: false,
+        };
+        // The cached picture is shown (dimmed, while not connected) until
+        // the first live frame replaces it. Only the GUI side is seeded.
+        if let Some(frame) = cached {
+            viewer.upload_texture(&seed_context, &frame);
+            viewer.displayed_frame = Some(frame);
         }
+        viewer
     }
 
     fn refresh_texture(&mut self, ctx: &egui::Context) {
@@ -759,6 +894,7 @@ impl ViewerApp {
     fn exit(&mut self, ctx: &egui::Context, exit: Exit) {
         match exit {
             Exit::Disconnect => self.disconnect_requested = true,
+            Exit::Switch(name) => self.switch_to = Some(name),
             Exit::Quit => {
                 self.quit_confirmed = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -767,12 +903,13 @@ impl ViewerApp {
     }
 
     fn confirm_exit_dialog(&mut self, ctx: &egui::Context, status: &ViewerStatus) {
-        let Some(exit) = self.pending_exit else {
+        let Some(exit) = self.pending_exit.clone() else {
             return;
         };
-        let verb = match exit {
-            Exit::Disconnect => "Disconnect",
-            Exit::Quit => "Quit",
+        let verb = match &exit {
+            Exit::Disconnect => "Disconnect".to_owned(),
+            Exit::Quit => "Quit".to_owned(),
+            Exit::Switch(name) => format!("Switch to {name}"),
         };
         let mut confirmed = false;
         let mut cancelled = false;
@@ -786,7 +923,7 @@ impl ViewerApp {
             ui.label("The host loses these drives, which can break an installation in progress.");
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                confirmed = ui.button(verb).clicked();
+                confirmed = ui.button(&verb).clicked();
                 cancelled = ui.button("Cancel").clicked();
             });
         });
@@ -1421,6 +1558,17 @@ impl ViewerApp {
             if let Some(frame) = &self.displayed_frame {
                 ui.separator();
                 ui.label(format!("{}×{}", frame.width, frame.height));
+            }
+            if let Some(name) =
+                hosts_ui::show_switcher(ui, &self.switcher, self.current_host.as_deref())
+            {
+                let mounted = !mounted_images(status).is_empty();
+                match plan_switch(self.current_host.as_deref(), &name, mounted) {
+                    SwitchPlan::Noop => {}
+                    SwitchPlan::Go | SwitchPlan::Confirm => {
+                        self.request_exit(ctx, status, Exit::Switch(name));
+                    }
+                }
             }
             ui.separator();
             if !status.keyboard {
