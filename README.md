@@ -40,7 +40,19 @@ Interactive viewer (the default command):
 cargo run --release                 # login form
 cargo run --release -- viewer --auto          # connect with .env credentials
 cargo run --release -- viewer --jnlp jnlpgenerator-16   # downloaded launch file
+cargo run --release -- viewer --name rack1 --auto       # host from hosts.toml
 ```
+
+The login form has a host picker when `hosts.toml` (see
+[Several ILOMs](#several-iloms)) lists hosts: picking one fills in its address,
+user and keyboard layout (for that session only), and the last pick is
+remembered. The password comes from the environment (`password_env`,
+`ILOM_PASSWORD_<NAME>` or `ILOM_PASSWORD`); the form asks for it only when none
+is set, and it is never saved. **Manage hosts…** adds, edits and removes
+entries. Saving keeps comments and the `listen`, `media_dir` and
+`allow_writable_media` keys that the viewer does not edit. **Custom** keeps the
+manual address entry. `--name` preselects a host (and `--auto` connects to it);
+`--jnlp` and `--host` win over it. Switch hosts with Disconnect.
 
 Click the framebuffer to capture the keyboard; the toolbar shows the capture
 state and a **Release** button. Keys are sent by physical position, so the
@@ -153,7 +165,8 @@ away, because the ILOM has only a few web session slots.
 
 ## Several ILOMs
 
-`ilom-mcp` and `ilom-vnc` can drive several ILOMs from one process. Name them
+`ilom-mcp` and `ilom-vnc` can drive several ILOMs from one process, and the
+viewer picks and edits the same entries. Name them
 in `hosts.toml` in the config directory (`ILOM_HOSTS` or `--hosts <file>`
 select another file):
 

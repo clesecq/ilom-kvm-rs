@@ -246,3 +246,31 @@ Needs two ILOMs in `hosts.toml` (`rack1`, `rack2`, each with its own `listen`).
       refuse to start with a message naming them.
 - [ ] `--host` on the command line ignores `hosts.toml` and serves one host
       called `default`.
+
+## GUI hosts (hosts.toml)
+
+Use a temporary file: `ILOM_HOSTS=/tmp/hosts.toml cargo run --release`.
+
+- [ ] With no file, the form has no picker. **Manage hosts…** opens a dialog
+      with an empty list; **Add host** with a name, an address, user `admin`
+      and layout `fr` saves, and the host is selected in the picker.
+- [ ] Add a comment and a `listen = "127.0.0.1:5901"` line to that entry in
+      the file, then edit it in the dialog (change the address): the comment
+      and `listen` survive.
+- [ ] Renaming a host, or adding one with an existing name, behaves (the second
+      shows an inline error). Delete asks for confirmation and keeps the other
+      hosts.
+- [ ] A JNLP entry (Browse…) connects without a password field.
+- [ ] Picking a host with no password variable set shows
+      `Password (ILOM_PASSWORD_<NAME> is not set)`; with it set, the form says
+      the password comes from the environment. The password is not in any file.
+- [ ] A host with `layout = "fr"` pastes French characters correctly; after
+      Disconnect and picking **Custom**, the layout menu shows the usual one
+      again, and `settings` keeps its own `layout`.
+- [ ] `viewer --name rack1` preselects it; with the password in the
+      environment, `--auto` connects at once. `--name` with `--host` warns and
+      uses `--host`. An unknown name exits with an error.
+- [ ] A broken `hosts.toml` shows its error on the form and does not stop the
+      viewer.
+- [ ] The next start preselects the last picked host (`last_host_name` in
+      `settings`).
