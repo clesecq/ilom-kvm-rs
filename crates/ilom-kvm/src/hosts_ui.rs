@@ -2,12 +2,13 @@
 //! remove entries of `hosts.toml`. The state and the decisions are plain
 //! functions (tested below); only `HostsUi::show_*` draws.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use eframe::egui::{self, Color32};
 use ilom_kvm_core::{
-    hosts::{Env, Host, HostsFile, MissingPassword},
+    hosts::{Env, Host, HostsFile, MissingPassword, PasswordOrigin},
     keymap::Layout,
+    keyring::{SecretStore, move_entry},
     session::Source,
 };
 
@@ -103,25 +104,40 @@ pub fn check_name(file: &HostsFile, original: Option<&str>, name: &str) -> Resul
     Ok(())
 }
 
+/// A saved entry: its name, and a problem with the keyring that did not
+/// stop the save.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub name: String,
+    pub warning: Option<String>,
+}
+
 /// Saves the dialog's entry to `path` (renaming first when the name
-/// changed) and returns its name.
+/// changed, which also moves the keyring password) and returns its name.
 pub fn apply_save(
     path: &std::path::Path,
     file: &HostsFile,
     form: &HostForm,
-) -> Result<String, String> {
+    store: &dyn SecretStore,
+) -> Result<Saved, String> {
     let (name, host) = form.to_host()?;
     check_name(file, form.original.as_deref(), &name)?;
     let render = |error: anyhow::Error| format!("{error:#}");
+    let mut warning = None;
     if let Some(original) = form
         .original
         .as_deref()
         .filter(|original| *original != name)
     {
         HostsFile::rename_host(path, original, &name).map_err(render)?;
+        if let Err(error) = move_entry(store, original, &name) {
+            warning = Some(format!(
+                "Renamed, but the saved password could not be moved: {error:#}"
+            ));
+        }
     }
     HostsFile::save_host(path, &name, &host).map_err(render)?;
-    Ok(name)
+    Ok(Saved { name, warning })
 }
 
 /// What picking a host puts in the login form.
@@ -148,10 +164,16 @@ pub enum Resolved {
     Invalid(String),
 }
 
-/// Turns a picked host into a session source. The environment wins; a
-/// typed password is only used when it has nothing.
-pub fn resolve(name: &str, host: &Host, typed_password: &str, env: Env) -> Resolved {
-    match host.source(name, env) {
+/// Turns a picked host into a session source. The environment wins, then
+/// the keyring; a typed password is only used when both have nothing.
+pub fn resolve(
+    name: &str,
+    host: &Host,
+    typed_password: &str,
+    env: Env,
+    store: &dyn SecretStore,
+) -> Resolved {
+    match host.source(name, env, store) {
         Ok(source) => Resolved::Ready(source),
         Err(error) => match error.downcast_ref::<MissingPassword>() {
             Some(missing) if typed_password.is_empty() => {
@@ -167,11 +189,28 @@ pub fn resolve(name: &str, host: &Host, typed_password: &str, env: Env) -> Resol
     }
 }
 
-/// The variable to prompt about when the host has no password in `env`.
-pub fn password_prompt(name: &str, host: &Host, env: Env) -> Option<String> {
-    match resolve(name, host, "", env) {
-        Resolved::NeedPassword(variable) => Some(variable),
-        _ => None,
+/// What the login form must do about the password of a picked host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasswordLookup {
+    /// A JNLP file: no password.
+    NotNeeded,
+    Found(PasswordOrigin),
+    /// Nowhere to be found: ask for it. Names the variable.
+    Prompt(String),
+}
+
+pub fn lookup(name: &str, host: &Host, env: Env, store: &dyn SecretStore) -> PasswordLookup {
+    if host.jnlp.is_some() {
+        return PasswordLookup::NotNeeded;
+    }
+    match host.source(name, env, store) {
+        Ok(_) => host
+            .password_origin(name, env, store)
+            .map_or(PasswordLookup::NotNeeded, PasswordLookup::Found),
+        Err(error) => match error.downcast_ref::<MissingPassword>() {
+            Some(missing) => PasswordLookup::Prompt(missing.variable.clone()),
+            None => PasswordLookup::NotNeeded,
+        },
     }
 }
 
@@ -190,18 +229,28 @@ pub struct HostsUi {
     /// Name picked in the combo; `None` is manual entry.
     pub selected: Option<String>,
     manage: Option<Manage>,
+    store: Arc<dyn SecretStore>,
+    /// The keyring is slow to ask, so the form's answer is kept per host
+    /// until something may have changed it.
+    cache: Option<(String, PasswordLookup)>,
 }
 
 const ERROR_COLOR: Color32 = Color32::from_rgb(235, 90, 90);
 
 impl HostsUi {
-    pub fn load(path: Option<PathBuf>, selected: Option<String>) -> Self {
+    pub fn load(
+        path: Option<PathBuf>,
+        selected: Option<String>,
+        store: Arc<dyn SecretStore>,
+    ) -> Self {
         let mut ui = Self {
             path,
             file: HostsFile::default(),
             load_error: None,
             selected,
             manage: None,
+            store,
+            cache: None,
         };
         ui.reload();
         ui
@@ -209,6 +258,7 @@ impl HostsUi {
 
     /// Rereads the file; a broken file shows its error and no hosts.
     pub fn reload(&mut self) {
+        self.cache = None;
         self.load_error = None;
         self.file = match &self.path {
             Some(path) => HostsFile::load(path).unwrap_or_else(|error| {
@@ -238,6 +288,31 @@ impl HostsUi {
             .map(|(name, host)| (name.as_str(), host))
     }
 
+    pub fn store(&self) -> &Arc<dyn SecretStore> {
+        &self.store
+    }
+
+    /// Forgets the cached password lookup: the keyring may have changed.
+    pub fn invalidate(&mut self) {
+        self.cache = None;
+    }
+
+    /// Where the picked host's password comes from, asking the keyring once
+    /// per host.
+    pub fn password_lookup(&mut self, env: Env) -> Option<PasswordLookup> {
+        let (name, host) = self
+            .selected_host()
+            .map(|(name, host)| (name.to_owned(), host.clone()))?;
+        if let Some((cached, found)) = &self.cache
+            && *cached == name
+        {
+            return Some(found.clone());
+        }
+        let found = lookup(&name, &host, env, self.store.as_ref());
+        self.cache = Some((name, found.clone()));
+        Some(found)
+    }
+
     pub fn open_manage(&mut self) {
         self.manage = Some(Manage::default());
     }
@@ -258,7 +333,11 @@ impl HostsUi {
                     ui.selectable_value(&mut self.selected, Some(name.clone()), name);
                 }
             });
-        self.selected != before
+        if self.selected != before {
+            self.cache = None;
+            return true;
+        }
+        false
     }
 
     /// The add/edit/remove dialog, while open.
@@ -296,12 +375,26 @@ impl HostsUi {
                     .map(|host| HostForm::from_host(&name, host));
             }
             Some(Action::Delete(name)) => manage.confirm_delete = Some(name),
+            Some(Action::Forget(name)) => {
+                manage.error = Some(match self.store.delete(&name) {
+                    Ok(()) => format!("Saved password of {name} forgotten"),
+                    Err(error) => format!("Could not forget the password: {error:#}"),
+                });
+                self.cache = None;
+            }
             Some(Action::CancelDelete) => manage.confirm_delete = None,
             Some(Action::ConfirmDelete(name)) => {
                 manage.confirm_delete = None;
                 manage.error = HostsFile::remove_host(&path, &name)
                     .err()
                     .map(|error| format!("{error:#}"));
+                if manage.error.is_none()
+                    && let Err(error) = self.store.delete(&name)
+                {
+                    manage.error = Some(format!(
+                        "Removed, but the saved password could not be deleted: {error:#}"
+                    ));
+                }
                 self.reload();
             }
             Some(Action::CancelEdit) => {
@@ -310,11 +403,11 @@ impl HostsUi {
             }
             Some(Action::Save) => {
                 if let Some(form) = manage.editing.clone() {
-                    match apply_save(&path, &self.file, &form) {
-                        Ok(name) => {
+                    match apply_save(&path, &self.file, &form, self.store.as_ref()) {
+                        Ok(saved) => {
                             manage.editing = None;
-                            manage.error = None;
-                            self.selected = Some(name);
+                            manage.error = saved.warning;
+                            self.selected = Some(saved.name);
                             self.reload();
                         }
                         Err(message) => manage.error = Some(message),
@@ -332,7 +425,7 @@ impl HostsUi {
         let mut action = None;
         ui.heading("Hosts");
         ui.small(format!(
-            "Saved in {}. Passwords are never saved.",
+            "Saved in {}. Passwords are not in this file: they come from the environment or the OS keyring.",
             self.path
                 .as_ref()
                 .map(|path| path.display().to_string())
@@ -361,6 +454,9 @@ impl HostsUi {
                     } else {
                         if ui.button("Delete").clicked() {
                             action = Some(Action::Delete(name.clone()));
+                        }
+                        if host.jnlp.is_none() && ui.button("Forget password").clicked() {
+                            action = Some(Action::Forget(name.clone()));
                         }
                         if ui.button("Edit").clicked() {
                             action = Some(Action::Edit(name.clone()));
@@ -460,6 +556,7 @@ enum Action {
     Add,
     Edit(String),
     Delete(String),
+    Forget(String),
     CancelDelete,
     ConfirmDelete(String),
     CancelEdit,
@@ -469,6 +566,8 @@ enum Action {
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    use ilom_kvm_core::keyring::MemoryStore;
 
     use super::*;
 
@@ -576,45 +675,65 @@ mod tests {
     }
 
     #[test]
-    fn password_from_env_else_prompt() {
+    fn password_from_env_then_keyring_then_prompt() {
         let host = web("10.0.0.5");
         let with_env = env_of(&[("ILOM_PASSWORD_RACK1", "pw")]);
+        let saved = MemoryStore::with(&[("rack1", "saved")]);
+        let empty = MemoryStore::new();
         assert!(matches!(
-            resolve("rack1", &host, "", &with_env),
+            resolve("rack1", &host, "", &with_env, &saved),
             Resolved::Ready(Source::Web { ref password, .. }) if password == "pw"
         ));
-        assert_eq!(password_prompt("rack1", &host, &with_env), None);
+        assert_eq!(
+            lookup("rack1", &host, &with_env, &saved),
+            PasswordLookup::Found(PasswordOrigin::Env)
+        );
 
         let none = env_of(&[]);
+        assert!(matches!(
+            resolve("rack1", &host, "", &none, &saved),
+            Resolved::Ready(Source::Web { ref password, .. }) if password == "saved"
+        ));
         assert_eq!(
-            resolve("rack1", &host, "", &none),
+            lookup("rack1", &host, &none, &saved),
+            PasswordLookup::Found(PasswordOrigin::Keyring)
+        );
+        // A typed password does not override the keyring entry.
+        assert!(matches!(
+            resolve("rack1", &host, "typed", &none, &saved),
+            Resolved::Ready(Source::Web { ref password, .. }) if password == "saved"
+        ));
+
+        assert_eq!(
+            resolve("rack1", &host, "", &none, &empty),
             Resolved::NeedPassword("ILOM_PASSWORD_RACK1".into())
         );
         assert_eq!(
-            password_prompt("rack1", &host, &none).as_deref(),
-            Some("ILOM_PASSWORD_RACK1")
+            lookup("rack1", &host, &none, &empty),
+            PasswordLookup::Prompt("ILOM_PASSWORD_RACK1".into())
         );
         assert_eq!(
-            resolve("rack1", &host, "typed", &none),
+            resolve("rack1", &host, "typed", &none, &empty),
             Resolved::Ready(Source::Web {
                 host: "10.0.0.5".into(),
                 username: "root".into(),
                 password: "typed".into(),
             })
         );
-        // The environment wins over what was typed.
-        assert!(matches!(
-            resolve("rack1", &host, "typed", &with_env),
-            Resolved::Ready(Source::Web { ref password, .. }) if password == "pw"
-        ));
+        // A broken keyring behaves like an empty one.
+        assert_eq!(
+            resolve("rack1", &host, "", &none, &MemoryStore::failing()),
+            Resolved::NeedPassword("ILOM_PASSWORD_RACK1".into())
+        );
         let jnlp = Host {
             jnlp: Some("/tmp/a.jnlp".into()),
             ..Host::default()
         };
         assert!(matches!(
-            resolve("j", &jnlp, "", &none),
+            resolve("j", &jnlp, "", &none, &empty),
             Resolved::Ready(Source::Jnlp(_))
         ));
+        assert_eq!(lookup("j", &jnlp, &none, &empty), PasswordLookup::NotNeeded);
     }
 
     #[test]
@@ -629,7 +748,12 @@ mod tests {
         let mut form = HostForm::from_host("a", &file.hosts["a"]);
         form.name = "b".into();
         form.host = "i".into();
-        assert_eq!(apply_save(&path, &file, &form).unwrap(), "b");
+        let store = MemoryStore::with(&[("a", "pw")]);
+        let saved = apply_save(&path, &file, &form, &store).unwrap();
+        assert_eq!((saved.name.as_str(), saved.warning), ("b", None));
+        // The saved password follows the rename.
+        assert_eq!(store.get("a").unwrap(), None);
+        assert_eq!(store.get("b").unwrap().as_deref(), Some("pw"));
         let saved = HostsFile::load(&path).unwrap();
         assert_eq!(saved.hosts.keys().collect::<Vec<_>>(), ["b"]);
         assert_eq!(saved.hosts["b"].host.as_deref(), Some("i"));
@@ -640,15 +764,19 @@ mod tests {
             host: "x".into(),
             ..HostForm::default()
         };
-        assert!(apply_save(&path, &saved, &clash).is_err());
+        assert!(apply_save(&path, &saved, &clash, &store).is_err());
         clash.name = "c".into();
-        assert_eq!(apply_save(&path, &saved, &clash).unwrap(), "c");
+        assert_eq!(apply_save(&path, &saved, &clash, &store).unwrap().name, "c");
     }
 
     #[test]
     fn ui_state_follows_the_file() {
         let path = scratch("state");
-        let mut ui = HostsUi::load(Some(path.clone()), Some("gone".into()));
+        let mut ui = HostsUi::load(
+            Some(path.clone()),
+            Some("gone".into()),
+            Arc::new(MemoryStore::new()),
+        );
         assert_eq!(ui.selected, None);
         HostsFile::save_host(&path, "a", &web("h")).unwrap();
         ui.selected = Some("a".into());
@@ -658,5 +786,42 @@ mod tests {
         ui.reload();
         assert!(ui.load_error.is_some());
         assert!(ui.file().hosts.is_empty());
+    }
+
+    #[test]
+    fn rename_with_a_broken_keyring_warns_but_saves() {
+        let path = scratch("warn");
+        fs::write(&path, "[hosts.a]\nhost = \"h\"\n").unwrap();
+        let file = HostsFile::load(&path).unwrap();
+        let mut form = HostForm::from_host("a", &file.hosts["a"]);
+        form.name = "b".into();
+        let saved = apply_save(&path, &file, &form, &MemoryStore::failing()).unwrap();
+        assert_eq!(saved.name, "b");
+        assert!(saved.warning.is_some());
+        assert!(HostsFile::load(&path).unwrap().hosts.contains_key("b"));
+    }
+
+    #[test]
+    fn password_lookup_is_cached_until_invalidated() {
+        let path = scratch("cache");
+        HostsFile::save_host(&path, "a", &web("h")).unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let mut ui = HostsUi::load(Some(path), Some("a".into()), store.clone());
+        let none = env_of(&[]);
+        assert_eq!(
+            ui.password_lookup(&none),
+            Some(PasswordLookup::Prompt("ILOM_PASSWORD_A".into()))
+        );
+        store.set("a", "pw").unwrap();
+        // Still the old answer: the keyring is not asked again.
+        assert!(matches!(
+            ui.password_lookup(&none),
+            Some(PasswordLookup::Prompt(_))
+        ));
+        ui.invalidate();
+        assert_eq!(
+            ui.password_lookup(&none),
+            Some(PasswordLookup::Found(PasswordOrigin::Keyring))
+        );
     }
 }

@@ -11,6 +11,9 @@
 //! allow_writable_media = false
 //! password_env = "ILOM_PASSWORD_RACK1"
 //! ```
+//!
+//! Passwords are not in the file: they come from the environment, else from
+//! the OS keyring entry named after the host (see [`crate::keyring`]).
 
 use std::{
     collections::BTreeMap,
@@ -21,8 +24,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use toml_edit::{DocumentMut, Item, Table, value};
+use tracing::warn;
 
-use crate::{config, keymap::Layout, session::Source};
+use crate::{config, keymap::Layout, keyring::SecretStore, session::Source};
 
 /// Name of the host built from `--host`/`--jnlp` when there is no file.
 pub const DEFAULT_NAME: &str = "default";
@@ -57,12 +61,19 @@ pub struct HostsFile {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "no ILOM password for host {name:?}: set {variable} (or ILOM_PASSWORD) in the environment \
-     or .env"
+     or .env, or save one in the keyring from the viewer"
 )]
 pub struct MissingPassword {
     pub name: String,
     /// The per-host variable to set.
     pub variable: String,
+}
+
+/// Where a host's password was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasswordOrigin {
+    Env,
+    Keyring,
 }
 
 /// Parses a layout id such as `us` or `fr`, listing the valid ones on error.
@@ -256,17 +267,15 @@ impl Host {
         self.layout.as_deref().and_then(Layout::from_id)
     }
 
-    /// Where the console session gets its launch parameters. The password
-    /// comes from `password_env`, else `ILOM_PASSWORD_<NAME>`, else
-    /// `ILOM_PASSWORD`. A JNLP file needs none.
-    pub fn source(&self, name: &str, env: Env) -> Result<Source> {
-        if let Some(path) = &self.jnlp {
-            return Ok(Source::Jnlp(path.clone()));
-        }
-        let host = self
-            .host
-            .clone()
-            .ok_or_else(|| anyhow!("host {name:?} has no host or jnlp"))?;
+    /// Finds the password: `password_env`, else `ILOM_PASSWORD_<NAME>`, else
+    /// `ILOM_PASSWORD`, else the keyring entry named `name`. A keyring that
+    /// fails or does not answer counts as having no entry.
+    fn find_password(
+        &self,
+        name: &str,
+        env: Env,
+        store: &dyn SecretStore,
+    ) -> Result<(String, PasswordOrigin), MissingPassword> {
         let per_host = format!("ILOM_PASSWORD_{}", env_suffix(name));
         let mut candidates = Vec::new();
         if let Some(variable) = &self.password_env {
@@ -274,13 +283,53 @@ impl Host {
         }
         candidates.push(per_host.clone());
         candidates.push("ILOM_PASSWORD".to_string());
-        let password = candidates
+        if let Some(password) = candidates
             .iter()
             .find_map(|variable| env(variable).filter(|value| !value.is_empty()))
-            .ok_or_else(|| MissingPassword {
-                name: name.to_string(),
-                variable: self.password_env.clone().unwrap_or(per_host),
-            })?;
+        {
+            return Ok((password, PasswordOrigin::Env));
+        }
+        match store.get(name) {
+            Ok(Some(password)) if !password.is_empty() => {
+                return Ok((password, PasswordOrigin::Keyring));
+            }
+            Ok(_) => {}
+            Err(error) => warn!(host = name, error = %format!("{error:#}"), "keyring not used"),
+        }
+        Err(MissingPassword {
+            name: name.to_string(),
+            variable: self.password_env.clone().unwrap_or(per_host),
+        })
+    }
+
+    /// Where the password comes from; `None` when there is none (or the host
+    /// is a JNLP file, which needs none).
+    pub fn password_origin(
+        &self,
+        name: &str,
+        env: Env,
+        store: &dyn SecretStore,
+    ) -> Option<PasswordOrigin> {
+        if self.jnlp.is_some() {
+            return None;
+        }
+        self.find_password(name, env, store)
+            .ok()
+            .map(|(_, origin)| origin)
+    }
+
+    /// Where the console session gets its launch parameters. The password
+    /// comes from the environment, else from the keyring (see
+    /// [`Host::find_password`]). A JNLP file needs none.
+    pub fn source(&self, name: &str, env: Env, store: &dyn SecretStore) -> Result<Source> {
+        if let Some(path) = &self.jnlp {
+            return Ok(Source::Jnlp(path.clone()));
+        }
+        let host = self
+            .host
+            .clone()
+            .ok_or_else(|| anyhow!("host {name:?} has no host or jnlp"))?;
+        let (password, _) = self.find_password(name, env, store)?;
         Ok(Source::Web {
             host,
             username: self.user.clone().unwrap_or_else(|| "root".into()),
@@ -308,6 +357,7 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyring::MemoryStore;
 
     fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |key| {
@@ -341,11 +391,13 @@ mod tests {
         assert_eq!(rack1.user, None);
         let env = env_of(&[("ILOM_PASSWORD", "pw")]);
         assert!(matches!(
-            rack1.source("rack1", &env).unwrap(),
+            rack1.source("rack1", &env, &MemoryStore::new()).unwrap(),
             Source::Web { ref username, .. } if username == "root"
         ));
         assert!(matches!(
-            file.hosts["rack2"].source("rack2", &env).unwrap(),
+            file.hosts["rack2"]
+                .source("rack2", &env, &MemoryStore::new())
+                .unwrap(),
             Source::Jnlp(_)
         ));
     }
@@ -377,7 +429,8 @@ mod tests {
             password_env: Some("MY_PW".into()),
             ..Host::default()
         };
-        let source = |pairs: &[(&str, &str)]| host.source("rack-1", &env_of(pairs));
+        let source =
+            |pairs: &[(&str, &str)]| host.source("rack-1", &env_of(pairs), &MemoryStore::new());
         let password = |pairs: &[(&str, &str)]| match source(pairs).unwrap() {
             Source::Web { password, .. } => password,
             Source::Jnlp(_) => unreachable!(),
@@ -400,7 +453,10 @@ mod tests {
             host: Some("h".into()),
             ..Host::default()
         };
-        let error = host.source("rack-1", &env_of(&[])).unwrap_err().to_string();
+        let error = host
+            .source("rack-1", &env_of(&[]), &MemoryStore::new())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("ILOM_PASSWORD_RACK_1"), "{error}");
     }
 
@@ -539,9 +595,63 @@ mod tests {
 
     #[test]
     fn missing_password_can_be_downcast() {
-        let error = web("h").source("rack-1", &env_of(&[])).unwrap_err();
+        let error = web("h")
+            .source("rack-1", &env_of(&[]), &MemoryStore::new())
+            .unwrap_err();
         let missing = error.downcast_ref::<MissingPassword>().unwrap();
         assert_eq!(missing.variable, "ILOM_PASSWORD_RACK_1");
         assert_eq!(missing.name, "rack-1");
+    }
+
+    fn password(source: Source) -> String {
+        match source {
+            Source::Web { password, .. } => password,
+            Source::Jnlp(_) => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn keyring_comes_after_the_environment() {
+        let host = web("h");
+        let store = MemoryStore::with(&[("rack1", "saved")]);
+        let with_env = env_of(&[("ILOM_PASSWORD", "global")]);
+        let source = host.source("rack1", &with_env, &store).unwrap();
+        assert_eq!(password(source), "global");
+        assert_eq!(
+            host.password_origin("rack1", &with_env, &store),
+            Some(PasswordOrigin::Env)
+        );
+        let source = host.source("rack1", &env_of(&[]), &store).unwrap();
+        assert_eq!(password(source), "saved");
+        assert_eq!(
+            host.password_origin("rack1", &env_of(&[]), &store),
+            Some(PasswordOrigin::Keyring)
+        );
+        // The entry is per host name.
+        assert_eq!(host.password_origin("rack2", &env_of(&[]), &store), None);
+    }
+
+    #[test]
+    fn keyring_failure_falls_through() {
+        let host = web("h");
+        let store = MemoryStore::failing();
+        let error = host.source("rack1", &env_of(&[]), &store).unwrap_err();
+        assert!(error.downcast_ref::<MissingPassword>().is_some());
+        // Env still works with a broken keyring.
+        let with_env = env_of(&[("ILOM_PASSWORD", "global")]);
+        assert!(host.source("rack1", &with_env, &store).is_ok());
+        // An empty saved password is no password.
+        let empty = MemoryStore::with(&[("rack1", "")]);
+        assert!(host.source("rack1", &env_of(&[]), &empty).is_err());
+    }
+
+    #[test]
+    fn jnlp_has_no_password_origin() {
+        let jnlp = Host {
+            jnlp: Some("f".into()),
+            ..Host::default()
+        };
+        let store = MemoryStore::with(&[("a", "pw")]);
+        assert_eq!(jnlp.password_origin("a", &env_of(&[]), &store), None);
     }
 }

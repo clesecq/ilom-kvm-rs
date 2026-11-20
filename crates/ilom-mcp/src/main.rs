@@ -5,6 +5,7 @@ use clap::Parser;
 use ilom_kvm_core::{
     hosts::{DEFAULT_NAME, Host, HostsFile, parse_layout},
     keymap::Layout,
+    keyring::OsKeyring,
 };
 use ilom_mcp::{
     console::{Console, MediaPolicy},
@@ -94,9 +95,10 @@ async fn main() -> Result<()> {
     };
 
     let env = |key: &str| std::env::var(key).ok();
+    let keyring = OsKeyring::default();
     let mut consoles = BTreeMap::new();
     for (name, host) in &hosts {
-        let source = host.source(name, &env)?;
+        let source = host.source(name, &env, &keyring)?;
         let hub = Hub::new(source, Duration::from_secs(cli.idle_timeout));
         let policy = MediaPolicy {
             dir: host.media_dir.clone().or_else(|| cli.media_dir.clone()),

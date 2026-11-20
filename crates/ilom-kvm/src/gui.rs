@@ -12,6 +12,7 @@ use eframe::egui::{
 
 use ilom_kvm_core::{
     hid,
+    hosts::PasswordOrigin,
     keymap::{self, Layout},
     scsi::MediaKind,
     session::{
@@ -22,7 +23,7 @@ use ilom_kvm_core::{
 
 use crate::{
     clipboard::Clipboard,
-    hosts_ui::{self, HostsUi},
+    hosts_ui::{self, HostsUi, PasswordLookup},
     settings::Settings,
 };
 
@@ -76,6 +77,13 @@ pub struct IlomApp {
     hosts: HostsUi,
     /// Layout of the picked host, for the running session only.
     layout_override: Option<Layout>,
+    /// "Save password to the OS keyring" checkbox of the login form.
+    save_to_keyring: bool,
+    /// Typed password to keep once the session has connected.
+    pending_save: Option<(String, String)>,
+    /// Host and source of the password of the running session, so a
+    /// rejected keyring password can be dropped.
+    session_origin: Option<(String, PasswordOrigin)>,
 }
 
 /// Viewer choices the user can change in the menus.
@@ -101,6 +109,8 @@ pub struct Startup {
     /// Keyboard layout of the host picked on the command line, for this
     /// session only.
     pub layout_override: Option<Layout>,
+    /// Host and origin of the password of the session started at launch.
+    pub session_origin: Option<(String, PasswordOrigin)>,
 }
 
 impl IlomApp {
@@ -123,6 +133,9 @@ impl IlomApp {
             form_error: None,
             hosts: startup.hosts,
             layout_override: startup.layout_override,
+            save_to_keyring: false,
+            pending_save: None,
+            session_origin: startup.session_origin,
         }
     }
 
@@ -188,9 +201,10 @@ impl IlomApp {
                                 .hosts
                                 .selected_host()
                                 .map(|(name, host)| (name.to_owned(), host.clone()));
+                            let lookup = self.hosts.password_lookup(&env);
                             let mut responses = Vec::new();
                             let mut prompt = None;
-                            if let Some((name, host)) = &named {
+                            if let Some((_, host)) = &named {
                                 ui.add_space(6.0);
                                 match &host.jnlp {
                                     Some(path) => {
@@ -199,7 +213,9 @@ impl IlomApp {
                                     None => {
                                         let fill = hosts_ui::fill(host);
                                         ui.label(format!("{} as {}", fill.address, fill.username));
-                                        prompt = hosts_ui::password_prompt(name, host, &env);
+                                        if let Some(PasswordLookup::Prompt(variable)) = &lookup {
+                                            prompt = Some(variable.clone());
+                                        }
                                     }
                                 }
                                 ui.add_space(10.0);
@@ -238,8 +254,19 @@ impl IlomApp {
                                             .desired_width(f32::INFINITY),
                                     ),
                                 );
+                                if named.is_some() && !self.password.is_empty() {
+                                    ui.checkbox(
+                                        &mut self.save_to_keyring,
+                                        "Save password to the OS keyring",
+                                    );
+                                }
                             } else if !jnlp_host {
-                                ui.small("Password from the environment.");
+                                ui.small(match lookup {
+                                    Some(PasswordLookup::Found(PasswordOrigin::Keyring)) => {
+                                        "Password from the OS keyring."
+                                    }
+                                    _ => "Password from the environment.",
+                                });
                             }
                             ui.add_space(14.0);
                             connect = ui
@@ -284,6 +311,8 @@ impl IlomApp {
         }
         self.hosts.show_manage(ui.ctx());
         if open_jnlp {
+            self.session_origin = None;
+            self.pending_save = None;
             self.layout_override = None;
             self.hosts.selected = None;
             return rfd::FileDialog::new()
@@ -299,9 +328,21 @@ impl IlomApp {
             .selected_host()
             .map(|(name, host)| (name.to_owned(), host.clone()))
         {
-            return match hosts_ui::resolve(&name, &host, &self.password, &env) {
+            let lookup = self.hosts.password_lookup(&env);
+            let store = self.hosts.store().clone();
+            return match hosts_ui::resolve(&name, &host, &self.password, &env, store.as_ref()) {
                 hosts_ui::Resolved::Ready(source) => {
                     self.form_error = None;
+                    self.session_origin = match lookup {
+                        Some(PasswordLookup::Found(origin)) => Some((name.clone(), origin)),
+                        _ => None,
+                    };
+                    // A typed password is kept only once the login worked.
+                    self.pending_save = (self.session_origin.is_none()
+                        && self.save_to_keyring
+                        && host.jnlp.is_none()
+                        && !self.password.is_empty())
+                    .then(|| (name.clone(), self.password.clone()));
                     self.layout_override = host.layout();
                     self.settings.last_host_name = Some(name);
                     self.save_settings();
@@ -320,6 +361,8 @@ impl IlomApp {
         match self.web_source() {
             Ok(source) => {
                 self.form_error = None;
+                self.session_origin = None;
+                self.pending_save = None;
                 self.layout_override = None;
                 self.settings.last_host_name = None;
                 if let Source::Web { host, username, .. } = &source {
@@ -366,6 +409,7 @@ impl eframe::App for IlomApp {
             let prefs = viewer.prefs;
             let rejected = viewer.rejection();
             let login = viewer.login.clone();
+            let connected = viewer.connected();
             let leaving = viewer.disconnect_requested || rejected.is_some();
             // The picked host's layout is for this session only.
             let mut persisted = prefs;
@@ -373,8 +417,17 @@ impl eframe::App for IlomApp {
                 persisted.layout = self.prefs.layout;
             }
             self.remember_viewer_choices(persisted);
+            if connected && let Some((name, password)) = self.pending_save.take() {
+                if let Err(error) = self.hosts.store().set(&name, &password) {
+                    tracing::warn!(error = %format!("{error:#}"), "could not save the password");
+                }
+                self.hosts.invalidate();
+            }
             if leaving {
                 self.layout_override = None;
+                self.pending_save = None;
+                self.save_to_keyring = false;
+                let origin = self.session_origin.take();
                 // A rejected session goes back to the form instead of retrying.
                 if let Some((credentials, message)) = rejected {
                     if let Some((host, username)) = login {
@@ -383,10 +436,24 @@ impl eframe::App for IlomApp {
                     }
                     self.form_error = Some(if credentials {
                         self.password.clear();
-                        // Back to manual entry: a rejected environment password
-                        // could otherwise never be replaced by a typed one.
-                        self.hosts.selected = None;
-                        format!("Login rejected; check the username and password ({message})")
+                        if let Some((name, PasswordOrigin::Keyring)) = &origin {
+                            // Drop the bad saved password so a typed one can
+                            // replace it, and stop retrying it.
+                            if let Err(error) = self.hosts.store().delete(name) {
+                                tracing::warn!(error = %format!("{error:#}"), "could not delete the saved password");
+                            }
+                            self.hosts.invalidate();
+                            format!(
+                                "Login rejected; the saved keyring password was removed. \
+                                 Enter the password again ({message})"
+                            )
+                        } else {
+                            // Back to manual entry: a rejected environment
+                            // password could otherwise never be replaced by a
+                            // typed one.
+                            self.hosts.selected = None;
+                            format!("Login rejected; check the username and password ({message})")
+                        }
                     } else {
                         message
                     });
@@ -729,6 +796,15 @@ impl ViewerApp {
         } else if cancelled || modal.should_close() {
             self.pending_exit = None;
         }
+    }
+
+    /// The console session is up.
+    fn connected(&self) -> bool {
+        self.handle
+            .shared
+            .status
+            .lock()
+            .is_ok_and(|status| status.state == ConnectionState::Connected)
     }
 
     /// `(credentials, message)` once the session failed for good.

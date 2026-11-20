@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -13,6 +13,7 @@ use ilom_kvm_core::{
     hosts::HostsFile,
     jnlp::{self, ConsoleArgs},
     keymap::Layout,
+    keyring::{OsKeyring, SecretStore},
     known_certs::KnownCerts,
     scsi::{MediaImage, MediaKind},
     session::{Source, cert_policy},
@@ -88,6 +89,10 @@ struct Target {
     host: Option<String>,
     #[arg(long, env = "ILOM_USER", default_value = "root")]
     user: String,
+    /// Host from `hosts.toml`: its address, user and password (environment
+    /// or OS keyring) are used instead of --host and --user.
+    #[arg(long, conflicts_with = "jnlp")]
+    name: Option<String>,
 }
 
 impl Target {
@@ -97,10 +102,22 @@ impl Target {
         if let Some(path) = &self.jnlp {
             return load_jnlp(path);
         }
+        if let Some(name) = &self.name {
+            let path = HostsFile::default_path()?;
+            let file = HostsFile::load(&path)?;
+            let host = file
+                .hosts
+                .get(name)
+                .with_context(|| format!("no host named {name:?} in {}", path.display()))?;
+            let env = |key: &str| std::env::var(key).ok();
+            return host
+                .source(name, &env, &OsKeyring::default())?
+                .console_args();
+        }
         let host = self
             .host
             .as_deref()
-            .context("pass --jnlp or --host (or set ILOM_HOST)")?;
+            .context("pass --jnlp, --name or --host (or set ILOM_HOST)")?;
         let password = std::env::var("ILOM_PASSWORD")
             .context("set ILOM_PASSWORD in the environment or .env")?;
         web::fetch_console_args(host, &self.user, &password)
@@ -211,10 +228,13 @@ fn viewer(args: ViewerArgs) -> Result<()> {
     let hosts_path = HostsFile::default_path()
         .inspect_err(|error| warn!(error = %format!("{error:#}"), "hosts file disabled"))
         .ok();
+    let store: Arc<dyn SecretStore> = Arc::new(OsKeyring::default());
     let hosts = HostsUi::load(
         hosts_path,
         named.clone().or_else(|| settings.last_host_name.clone()),
+        store.clone(),
     );
+    let mut session_origin = None;
     let mut layout_override = None;
     let initial = match (&args.jnlp, named.as_deref(), args.auto) {
         (Some(path), _, _) => Some(Source::Jnlp(path.clone())),
@@ -227,10 +247,18 @@ fn viewer(args: ViewerArgs) -> Result<()> {
             layout_override = host.layout();
             if auto {
                 let env = |key: &str| std::env::var(key).ok();
-                match hosts_ui::resolve(name, host, "", &env) {
-                    hosts_ui::Resolved::Ready(source) => Some(source),
+                match hosts_ui::resolve(name, host, "", &env, store.as_ref()) {
+                    hosts_ui::Resolved::Ready(source) => {
+                        session_origin = host
+                            .password_origin(name, &env, store.as_ref())
+                            .map(|origin| (name.to_owned(), origin));
+                        Some(source)
+                    }
                     hosts_ui::Resolved::NeedPassword(variable) => {
-                        anyhow::bail!("--auto needs {variable} (or ILOM_PASSWORD)")
+                        anyhow::bail!(
+                            "--auto needs {variable} (or ILOM_PASSWORD, or a password saved \
+                             in the keyring)"
+                        )
                     }
                     hosts_ui::Resolved::Invalid(message) => anyhow::bail!(message),
                 }
@@ -259,6 +287,7 @@ fn viewer(args: ViewerArgs) -> Result<()> {
         settings_path,
         hosts,
         layout_override,
+        session_origin,
     };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

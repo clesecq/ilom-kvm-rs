@@ -11,6 +11,7 @@ pub mod hosts;
 pub mod ivtp;
 pub mod jnlp;
 pub mod keymap;
+pub mod keyring;
 pub mod known_certs;
 pub mod rc4;
 pub mod scsi;

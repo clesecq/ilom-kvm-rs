@@ -12,6 +12,7 @@ use clap::Parser;
 use ilom_kvm_core::{
     hosts::{DEFAULT_NAME, Host, HostsFile, env_suffix, parse_layout},
     keymap::Layout,
+    keyring::OsKeyring,
 };
 use ilom_vnc::{
     client::{self, Options},
@@ -128,10 +129,11 @@ fn main() -> Result<()> {
     })?;
 
     let env = |key: &str| std::env::var(key).ok();
+    let keyring = OsKeyring::default();
     let mut servers = Vec::new();
     for entry in entries {
         let Entry { name, host, listen } = entry;
-        let source = host.source(&name, &env)?;
+        let source = host.source(&name, &env, &keyring)?;
         let password = host.vnc_password(&name, &env);
         if password.as_ref().is_some_and(|password| password.len() > 8) {
             warn!(host = %name, "VNC Authentication only uses the first 8 characters of the VNC password");
