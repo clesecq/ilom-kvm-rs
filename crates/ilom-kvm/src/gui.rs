@@ -437,10 +437,18 @@ impl IlomApp {
 
     /// Remembers the running session's last picture for its host.
     fn snapshot_frame(&mut self) {
+        // Only a frame the session itself delivered: the displayed one may
+        // be the cached seed, and re-inserting it would refresh its age.
         if let (Some(viewer), Some(name)) = (&self.viewer, &self.current_host)
-            && let Some(frame) = &viewer.displayed_frame
+            && let Some(frame) = viewer
+                .handle
+                .shared
+                .latest_frame
+                .lock()
+                .ok()
+                .and_then(|frame| frame.clone())
         {
-            self.cache.insert(name, frame.clone());
+            self.cache.insert(name, frame);
         }
     }
 

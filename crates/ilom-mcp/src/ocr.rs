@@ -82,7 +82,7 @@ fn model_paths(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
 pub struct Ocr {
     dir: PathBuf,
     #[cfg(feature = "ocr")]
-    engine: std::sync::OnceLock<Result<engine::Engine, String>>,
+    engine: std::sync::OnceLock<engine::Engine>,
 }
 
 impl Ocr {
@@ -98,11 +98,13 @@ impl Ocr {
     /// Recognizes the text lines of `frame`.
     #[cfg(feature = "ocr")]
     pub fn read(&self, frame: &DecodedFrame) -> Result<Vec<Line>, String> {
-        self.engine
-            .get_or_init(|| engine::Engine::load(&self.dir))
-            .as_ref()
-            .map_err(Clone::clone)?
-            .read(frame)
+        // A failed load is not cached: the models may be downloaded while
+        // the server runs.
+        if self.engine.get().is_none() {
+            let engine = engine::Engine::load(&self.dir)?;
+            let _ = self.engine.set(engine);
+        }
+        self.engine.get().expect("engine just stored").read(frame)
     }
 
     #[cfg(not(feature = "ocr"))]
@@ -239,7 +241,7 @@ mod tests {
 
     #[cfg(feature = "ocr")]
     #[test]
-    fn reading_without_models_reports_them_and_keeps_the_error() {
+    fn reading_without_models_reports_them_and_retries() {
         let ocr = Ocr::new(PathBuf::from("/nonexistent/ocr-models"));
         for _ in 0..2 {
             let error = ocr.read(&blank_frame()).unwrap_err();

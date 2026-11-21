@@ -278,14 +278,17 @@ pub fn lookup(name: &str, host: &Host, env: Env, store: &dyn SecretStore) -> Pas
     if host.jnlp.is_some() {
         return PasswordLookup::NotNeeded;
     }
-    match host.source(name, env, store) {
-        Ok(_) => host
-            .password_origin(name, env, store)
-            .map_or(PasswordLookup::NotNeeded, PasswordLookup::Found),
-        Err(error) => match error.downcast_ref::<MissingPassword>() {
-            Some(missing) => PasswordLookup::Prompt(missing.variable.clone()),
-            None => PasswordLookup::NotNeeded,
-        },
+    if host.host.is_none() {
+        return PasswordLookup::NotNeeded;
+    }
+    // One keyring read: `source` followed by `password_origin` would ask twice.
+    match host.password_origin(name, env, store) {
+        Some(origin) => PasswordLookup::Found(origin),
+        None => PasswordLookup::Prompt(
+            host.password_env
+                .clone()
+                .unwrap_or_else(|| format!("ILOM_PASSWORD_{}", env_suffix(name))),
+        ),
     }
 }
 
