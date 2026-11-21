@@ -124,8 +124,26 @@ impl HostsFile {
             host.validate(name)
                 .with_context(|| format!("host {name:?}"))?;
         }
+        for name in file.hosts.keys() {
+            check_suffix_clash(file.hosts.keys().map(String::as_str), name)?;
+        }
         Ok(file)
     }
+}
+
+/// Fails when two distinct host names share an `env_suffix`, since they would
+/// read each other's `ILOM_PASSWORD_<NAME>` variable.
+fn check_suffix_clash<'a>(names: impl Iterator<Item = &'a str>, name: &str) -> Result<()> {
+    let suffix = env_suffix(name);
+    if let Some(other) = names
+        .into_iter()
+        .find(|other| *other != name && env_suffix(other) == suffix)
+    {
+        bail!(
+            "hosts {name:?} and {other:?} would share the password variable ILOM_PASSWORD_{suffix}; rename one"
+        );
+    }
+    Ok(())
 }
 
 impl HostsFile {
@@ -134,6 +152,9 @@ impl HostsFile {
     /// other hosts and comments stay as they are.
     pub fn save_host(path: &Path, name: &str, host: &Host) -> Result<()> {
         host.validate(name)?;
+        if let Ok(existing) = Self::load(path) {
+            check_suffix_clash(existing.hosts.keys().map(String::as_str), name)?;
+        }
         let mut document = read_document(path)?;
         let table = host_table(&mut document, name)?;
         set_or_remove(table, "host", host.host.as_deref());
@@ -178,6 +199,11 @@ impl HostsFile {
         if hosts.contains_key(new) {
             bail!("a host called {new:?} already exists");
         }
+        let others = hosts
+            .iter()
+            .map(|(key, _)| key.to_string())
+            .filter(|key| key != old);
+        check_suffix_clash(others.collect::<Vec<_>>().iter().map(String::as_str), new)?;
         let item = hosts
             .remove(old)
             .ok_or_else(|| anyhow!("no host called {old:?}"))?;
@@ -240,6 +266,9 @@ fn write_document(path: &Path, document: &DocumentMut) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
+    // Write through a symlink (dotfile managers) instead of replacing it.
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = target.as_path();
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, document.to_string())
         .with_context(|| format!("write {}", temporary.display()))?;
@@ -463,6 +492,13 @@ mod tests {
     #[test]
     fn vnc_password_and_name_sanitising() {
         assert_eq!(env_suffix("rack-1.b"), "RACK_1_B");
+    }
+
+    #[test]
+    fn names_sharing_a_password_variable_are_rejected() {
+        let text = "[hosts.rack-1]\nhost = \"a\"\n[hosts.rack_1]\nhost = \"b\"\n";
+        let error = HostsFile::parse(text).unwrap_err().to_string();
+        assert!(error.contains("ILOM_PASSWORD_RACK_1"), "{error}");
         let host = Host {
             host: Some("h".into()),
             ..Host::default()
