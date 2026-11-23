@@ -257,7 +257,8 @@ because stdout carries the protocol.
 
 OCR for `read_screen` is optional and off by default, so the default build
 has no OCR dependencies. Build it with `cargo build --release -p ilom-mcp
---features ocr` (pure Rust, [`ocrs`](https://github.com/robertknight/ocrs)).
+--features ocr` (pure Rust, [`ocrs`](https://github.com/robertknight/ocrs)),
+or download `ilom-mcp-ocr-<tag>-x86_64-unknown-linux-gnu` from a release (Linux only).
 The models are not bundled: download `text-detection.onnx` and
 `text-recognition.onnx` from
 `https://ocrs-models.s3-accelerate.amazonaws.com/` into `ocr-models/` in the

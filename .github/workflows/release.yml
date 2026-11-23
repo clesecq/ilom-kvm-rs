@@ -45,6 +45,11 @@ jobs:
         uses: ./.github/actions/linux-deps
       - run: cargo test --workspace --release --locked
       - run: cargo build --workspace --release --locked
+      # OCR build of the MCP server (Linux only: ocrs is not built on the other
+      # targets yet). A separate target dir keeps the default binary intact.
+      - name: Build ilom-mcp with OCR
+        if: runner.os == 'Linux'
+        run: cargo build -p ilom-mcp --release --locked --features ocr --target-dir target/ocr
       - name: Package
         shell: bash
         env:
@@ -57,6 +62,7 @@ jobs:
             cp "target/release/$exe$suffix" "dist/$exe-${GITHUB_REF_NAME}-${TARGET}$suffix"
           done
           if [ "$RUNNER_OS" = "Linux" ]; then
+            cp target/ocr/release/ilom-mcp "dist/ilom-mcp-ocr-${GITHUB_REF_NAME}-${TARGET}"
             cp LICENSE dist/LICENSE
             cp crates/ilom-kvm-core/third_party/aspeed_codec/LICENSE dist/LICENSE-aspeed_codec
           fi
